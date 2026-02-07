@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.bak
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+*.npy
+*.npz
+*.mp4
+*.avi
+*.jpg
+*.png
