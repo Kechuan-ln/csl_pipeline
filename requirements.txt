@@ -1,0 +1,37 @@
+# CSL Multi-Camera Calibration Pipeline - Python Dependencies
+# Compatible with Linux and macOS
+# Python 3.6+
+
+# Core Scientific Computing
+numpy>=1.19.0
+scipy>=1.5.0
+pandas>=1.1.0
+
+# Computer Vision
+opencv-contrib-python>=4.5.0  # Required: ChArUco detection in contrib module
+Pillow>=8.0.0
+
+# Video Processing & QR Detection
+pyzbar>=0.1.9  # QR code detection (requires system libzbar on Linux)
+
+# 3D Geometry & Motion Capture
+numpy-quaternion>=2021.11.0  # Quaternion operations for rotations
+aniposelib>=0.4.0  # Triangulation utilities
+
+# Optimization & Performance
+numba>=0.53.0  # JIT acceleration for numerical code
+
+# Visualization
+matplotlib>=3.3.0
+tqdm>=4.50.0  # Progress bars
+
+# Configuration & Data
+PyYAML>=5.3.0
+easydict>=1.9.0
+
+# Optional: Deep Learning (if needed for future extensions)
+# torch>=1.7.0  # Uncomment if using PyTorch models
+# torchvision>=0.8.0
+
+# Optional: Web-based Tools
+# gradio>=3.0.0  # Uncomment if using web interfaces

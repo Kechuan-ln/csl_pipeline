@@ -72,10 +72,10 @@ import cv2
 class ScanConfig:
     """扫描配置"""
     max_scan_duration: float = 240.0   # 最大扫描时长(秒) - 前4分钟
-    coarse_interval: float = 0.5       # 粗扫描间隔(秒)
-    fine_range: float = 5.0            # 精细扫描范围(±秒)
+    coarse_interval: float = 1.0       # 粗扫描间隔(秒) - 优化：从0.5s改为1s
+    fine_range: float = 10.0           # 精细扫描范围(±秒) - 优化：从5s改为10s
     fine_fps: float = 30.0             # 精细扫描帧率
-    target_detections: int = 30        # 目标检测数
+    target_detections: int = 15        # 目标检测数 - 优化：从30改为15
     frame_width: int = 960             # 提取帧宽度
     roi_ratio: float = 0.6             # ROI区域比例(中心60%)
 
@@ -84,10 +84,10 @@ class ScanConfig:
 class DenseScanConfig:
     """密集扫描配置 - 用于重试失败的相机"""
     max_scan_duration: float = 240.0   # 最大扫描时长(秒)
-    coarse_interval: float = 0.25      # 更密集的粗扫描间隔(秒)
-    fine_range: float = 3.0            # 精细扫描范围(±秒)
+    coarse_interval: float = 0.5       # 更密集的粗扫描间隔(秒) - 从0.25s改为0.5s
+    fine_range: float = 10.0           # 精细扫描范围(±秒)
     fine_fps: float = 30.0             # 精细扫描帧率
-    target_detections: int = 15        # 更低的目标数（更容易成功）
+    target_detections: int = 10        # 更低的目标数（更容易成功）
     frame_width: int = 1280            # 更高分辨率
     roi_ratio: float = 0.8             # 更大的ROI区域
 
@@ -450,27 +450,58 @@ def extract_frames_at_times(
     width: int = 960
 ) -> Dict[float, str]:
     """
-    在指定时间点提取帧
+    在指定时间点提取帧（优化版：批量提取而非逐帧调用ffmpeg）
 
     Returns: {time: frame_path}
     """
     os.makedirs(output_dir, exist_ok=True)
     result = {}
 
-    for i, t in enumerate(times):
-        output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", str(t),
-            "-i", video_path,
-            "-vframes", "1",
-            "-vf", f"scale={width}:-1",
-            "-q:v", "2",
-            output_path
-        ]
-        subprocess.run(cmd, capture_output=True)
-        if os.path.exists(output_path):
-            result[t] = output_path
+    if not times:
+        return result
+
+    # 按时间排序
+    sorted_times = sorted(times)
+
+    # 计算采样间隔（假设times是均匀间隔的粗采样）
+    if len(sorted_times) > 1:
+        avg_interval = (sorted_times[-1] - sorted_times[0]) / (len(sorted_times) - 1)
+        fps_extract = 1.0 / avg_interval if avg_interval > 0 else 1.0
+        # 限制fps，避免提取过多帧
+        fps_extract = min(fps_extract, 2.0)  # 最多2fps
+    else:
+        fps_extract = 1.0
+
+    # 批量提取：使用fps filter一次性提取所有帧
+    start_time = sorted_times[0]
+    duration = sorted_times[-1] - start_time + 2.0  # 加2秒缓冲
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", str(start_time),
+        "-i", video_path,
+        "-t", str(duration),
+        "-vf", f"fps={fps_extract},scale={width}:-1",
+        "-q:v", "2",
+        os.path.join(output_dir, "frame_%04d.jpg")
+    ]
+
+    subprocess.run(cmd, capture_output=True)
+
+    # 匹配提取的帧到请求的时间点
+    frame_files = sorted(Path(output_dir).glob("frame_*.jpg"))
+
+    for i, frame_file in enumerate(frame_files):
+        # 计算该帧对应的时间
+        frame_time = start_time + i / fps_extract
+
+        # 找到最接近的请求时间点
+        closest_time = min(sorted_times, key=lambda t: abs(t - frame_time))
+
+        # 如果误差在0.5秒内，认为匹配成功
+        if abs(frame_time - closest_time) < 0.5:
+            if closest_time not in result:  # 避免重复
+                result[closest_time] = str(frame_file)
 
     return result
 
@@ -599,47 +630,70 @@ def scan_video_fast(
         temp_dir = tempfile.mkdtemp(prefix=f"qr_scan_{cam_name}_")
 
     try:
-        # ===== 阶段1: 粗扫描 =====
-        coarse_times = list(np.arange(0, scan_duration, config.coarse_interval))
+        # ===== 阶段1: 增量窗口粗扫描 =====
+        # 策略：从小窗口开始，找到QR码后立即停止，避免扫描整个240秒
+        window_size = 30.0  # 初始窗口30秒
+        window_step = 30.0  # 每次扩展30秒
+        coarse_detections = {}
+        first_qr_time = None
 
         coarse_dir = os.path.join(temp_dir, "coarse")
-        frame_map = extract_frames_at_times(
-            video_path, coarse_times, coarse_dir, config.frame_width
-        )
 
-        if not frame_map:
-            return [], stats
+        while True:
+            # 当前窗口范围
+            window_end = min(window_size, scan_duration)
 
-        # 并行检测
-        frame_files = list(frame_map.values())
-        frame_times = list(frame_map.keys())
+            # 提取当前窗口的帧
+            coarse_times = list(np.arange(0, window_end, config.coarse_interval))
 
-        coarse_detections = parallel_qr_detect(frame_files, frame_times, prefix)
+            frame_map = extract_frames_at_times(
+                video_path, coarse_times, coarse_dir, config.frame_width
+            )
+
+            if frame_map:
+                # 并行检测
+                frame_files = list(frame_map.values())
+                frame_times = list(frame_map.keys())
+
+                coarse_detections = parallel_qr_detect(frame_files, frame_times, prefix)
+
+            # 找到QR码 → 立即停止
+            if coarse_detections:
+                all_times = []
+                for times in coarse_detections.values():
+                    all_times.extend(times)
+                first_qr_time = min(all_times)
+                stats['phase1_found_at'] = first_qr_time
+                stats['phase1_window'] = window_end
+                break
+
+            # 没找到 → 扩展窗口
+            if window_end >= scan_duration:
+                # 已经扫描完整个视频，尝试更密集的扫描
+                shutil.rmtree(coarse_dir, ignore_errors=True)
+                coarse_times = list(np.arange(0, scan_duration, config.coarse_interval / 2))
+                frame_map = extract_frames_at_times(
+                    video_path, coarse_times, coarse_dir, config.frame_width
+                )
+                coarse_detections = parallel_qr_detect(
+                    list(frame_map.values()), list(frame_map.keys()), prefix
+                )
+                if coarse_detections:
+                    all_times = []
+                    for times in coarse_detections.values():
+                        all_times.extend(times)
+                    first_qr_time = min(all_times)
+                    stats['phase1_found_at'] = first_qr_time
+                break
+
+            # 扩展窗口
+            window_size += window_step
 
         # 清理粗扫描帧
         shutil.rmtree(coarse_dir, ignore_errors=True)
 
-        if not coarse_detections:
-            # 没找到，尝试更密集的扫描
-            coarse_times = list(np.arange(0, scan_duration, config.coarse_interval / 2))
-            frame_map = extract_frames_at_times(
-                video_path, coarse_times, coarse_dir, config.frame_width
-            )
-            coarse_detections = parallel_qr_detect(
-                list(frame_map.values()), list(frame_map.keys()), prefix
-            )
-            shutil.rmtree(coarse_dir, ignore_errors=True)
-
-        if not coarse_detections:
+        if not coarse_detections or first_qr_time is None:
             return [], stats
-
-        # 找到QR码出现的时间
-        all_times = []
-        for times in coarse_detections.values():
-            all_times.extend(times)
-        first_qr_time = min(all_times)
-
-        stats['phase1_found_at'] = first_qr_time
 
         # ===== 阶段2: 精细扫描 =====
         fine_start = max(0, first_qr_time - config.fine_range)
@@ -679,7 +733,7 @@ def scan_video_fast(
                 all_detections[qr_num] = []
             all_detections[qr_num].extend(times)
 
-        # 取中位数
+        # 取中位数并检查是否达到目标检测数
         result = []
         for qr_num, times in sorted(all_detections.items()):
             median_time = float(np.median(times))
@@ -687,6 +741,11 @@ def scan_video_fast(
 
         result.sort()
         stats['total_detections'] = len(result)
+
+        # 提前停止：如果已经找到足够的QR码，不继续扫描
+        if len(result) >= config.target_detections:
+            stats['early_stop'] = True
+            print(f"  ✅ {cam_name}: 已找到{len(result)}个QR码，提前停止扫描")
 
         return result, stats
 
@@ -909,34 +968,317 @@ def fix_hevc_tag(video_path: str) -> bool:
         return False
 
 
+# =============================================================================
+# Smart Cut - 关键帧检测和智能裁剪
+# =============================================================================
+
+def get_keyframe_positions(video_path: str, max_duration: float = 10.0) -> List[float]:
+    """
+    获取视频开头的关键帧位置（时间戳）
+    只扫描前max_duration秒，因为我们只需要开头的关键帧信息
+    """
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_frames",
+        "-show_entries", "frame=pts_time,pict_type",
+        "-read_intervals", f"%+{max_duration}",
+        "-of", "csv=p=0",
+        video_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    keyframes = []
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split(',')
+        if len(parts) >= 2:
+            pts_time = parts[0].strip()
+            pict_type = parts[1].strip()
+            # 检查是否是I帧（关键帧）
+            if pict_type.startswith('I') and pts_time:
+                try:
+                    keyframes.append(float(pts_time))
+                except ValueError:
+                    pass
+
+    return sorted(keyframes)
+
+
+def find_nearest_keyframes(keyframes: List[float], target_time: float) -> Tuple[float, float]:
+    """找到目标时间前后最近的关键帧"""
+    before = 0.0
+    after = keyframes[-1] if keyframes else target_time
+
+    for kf in keyframes:
+        if kf <= target_time:
+            before = kf
+        else:
+            after = kf
+            break
+
+    return before, after
+
+
+def get_hardware_encoder(codec: str = 'hevc') -> List[str]:
+    """检测并返回可用的硬件编码器"""
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True, text=True
+    )
+    encoders_output = result.stdout
+
+    # 根据原始编码选择对应的硬件编码器
+    if codec in ['hevc', 'h265']:
+        # HEVC编码器
+        if sys.platform == 'darwin' and 'hevc_videotoolbox' in encoders_output:
+            return ['hevc_videotoolbox', '-q:v', '65']
+        elif 'hevc_nvenc' in encoders_output:
+            return ['hevc_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '18']
+        else:
+            return ['libx265', '-preset', 'ultrafast', '-crf', '18']
+    else:
+        # H.264编码器
+        if sys.platform == 'darwin' and 'h264_videotoolbox' in encoders_output:
+            return ['h264_videotoolbox', '-q:v', '65']
+        elif 'h264_nvenc' in encoders_output:
+            return ['h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '18']
+        else:
+            return ['libx264', '-preset', 'ultrafast', '-crf', '18']
+
+
+def direct_copy_video(
+    input_path: str,
+    output_path: str,
+    start_time: float,
+    duration: float
+) -> Tuple[bool, str]:
+    """直接copy（当起始点正好在关键帧时）"""
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", str(start_time),
+        "-i", input_path,
+        "-t", str(duration),
+        "-c:v", "copy",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        output_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode == 0 and os.path.exists(output_path):
+        return True, None
+    else:
+        return False, result.stderr
+
+
+def fallback_reencode(
+    input_path: str,
+    output_path: str,
+    start_time: float,
+    duration: float,
+    use_hardware_accel: bool = True
+) -> Tuple[bool, str]:
+    """退回到全重编码（使用硬件加速H.264）"""
+    cam_name = Path(input_path).parent.name
+
+    if use_hardware_accel:
+        encoder = get_hardware_encoder('h264')
+    else:
+        encoder = ['libx264', '-preset', 'ultrafast', '-crf', '18']
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", str(start_time),
+        "-i", input_path,
+        "-t", str(duration),
+        "-c:v", encoder[0]
+    ]
+    if len(encoder) > 1:
+        cmd.extend(encoder[1:])
+    cmd.extend([
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        output_path
+    ])
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode == 0 and os.path.exists(output_path):
+        return True, None
+    else:
+        return False, result.stderr
+
+
 def smart_cut_worker(args) -> Tuple[str, bool, str]:
-    """Smart Cut worker - 使用 smartcut CLI 工具"""
+    """
+    Smart Cut worker - Python实现的智能裁剪（不依赖外部smartcut CLI）
+
+    原理:
+    1. 找到start_time之前最近的关键帧 (kf_before)
+    2. 找到start_time之后最近的关键帧 (kf_after)
+    3. 重编码 [kf_before, kf_after) 但只输出 [start_time, kf_after)
+    4. Copy [kf_after, end]
+    5. Concat拼接
+    """
     cam_name, input_path, output_path, start_time, duration, temp_dir = args
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    end_time = start_time + duration
+    os.makedirs(temp_dir, exist_ok=True)
 
     try:
-        # 使用 smartcut CLI 进行帧精确裁剪
-        cmd = [
-            "smartcut",
-            input_path,
-            output_path,
-            "--keep", f"{start_time:.6f},{end_time:.6f}"
+        # 获取视频FPS
+        cmd_fps = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=r_frame_rate",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            input_path
+        ]
+        result_fps = subprocess.run(cmd_fps, capture_output=True, text=True)
+        fps_str = result_fps.stdout.strip()
+        num, den = map(int, fps_str.split('/'))
+        fps = num / den
+
+        # 特殊情况：如果start_time接近0，直接用copy
+        if start_time < 0.02:
+            success, error = direct_copy_video(input_path, output_path, start_time, duration)
+            if success:
+                fix_hevc_tag(output_path)
+                return cam_name, True, "direct_copy"
+            else:
+                return cam_name, False, error[:200] if error else "copy failed"
+
+        # 步骤1: 获取关键帧位置
+        keyframes = get_keyframe_positions(input_path, max_duration=start_time + 5)
+
+        if not keyframes:
+            # 没有关键帧，退回到全重编码
+            success, error = fallback_reencode(input_path, output_path, start_time, duration)
+            if success:
+                fix_hevc_tag(output_path)
+                return cam_name, True, "full_reencode"
+            else:
+                return cam_name, False, error[:200] if error else "reencode failed"
+
+        kf_before, kf_after = find_nearest_keyframes(keyframes, start_time)
+
+        # 计算需要跳过的时间
+        skip_duration = start_time - kf_before
+
+        # 如果start_time正好在关键帧上，直接用copy
+        if skip_duration < 0.001:
+            success, error = direct_copy_video(input_path, output_path, start_time, duration)
+            if success:
+                fix_hevc_tag(output_path)
+                return cam_name, True, "keyframe_copy"
+            else:
+                return cam_name, False, error[:200] if error else "copy failed"
+
+        # 步骤2: Smart Cut
+        segment1_duration = kf_after - start_time
+
+        if segment1_duration <= 0:
+            # 找下一个关键帧
+            for kf in keyframes:
+                if kf > start_time:
+                    kf_after = kf
+                    segment1_duration = kf_after - start_time
+                    break
+
+        # 临时文件
+        segment1_path = os.path.join(temp_dir, f"{cam_name}_seg1.mp4")
+        segment2_path = os.path.join(temp_dir, f"{cam_name}_seg2.mp4")
+        concat_list = os.path.join(temp_dir, f"{cam_name}_concat.txt")
+
+        # 段1: 重编码（只有几十帧）
+        encoder = get_hardware_encoder('h264')
+
+        cmd1 = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", str(kf_before),
+            "-i", input_path,
+            "-ss", str(skip_duration),
+            "-t", str(segment1_duration),
+            "-c:v", encoder[0]
+        ]
+        if len(encoder) > 1:
+            cmd1.extend(encoder[1:])
+        cmd1.extend([
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            segment1_path
+        ])
+
+        result1 = subprocess.run(cmd1, capture_output=True, text=True)
+        if result1.returncode != 0:
+            success, error = fallback_reencode(input_path, output_path, start_time, duration)
+            return cam_name, success, "seg1_failed->reencode"
+
+        # 段2: 直接copy
+        segment2_start = kf_after
+        segment2_duration = duration - segment1_duration
+
+        if segment2_duration > 0:
+            cmd2 = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-ss", str(segment2_start),
+                "-i", input_path,
+                "-t", str(segment2_duration),
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                segment2_path
+            ]
+
+            result2 = subprocess.run(cmd2, capture_output=True, text=True)
+            if result2.returncode != 0:
+                # 段2 copy失败，重编码
+                cmd2_reencode = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", str(segment2_start),
+                    "-i", input_path,
+                    "-t", str(segment2_duration),
+                    "-c:v", encoder[0]
+                ]
+                if len(encoder) > 1:
+                    cmd2_reencode.extend(encoder[1:])
+                cmd2_reencode.extend(["-c:a", "aac", "-movflags", "+faststart", segment2_path])
+                subprocess.run(cmd2_reencode, capture_output=True, text=True)
+
+        # 步骤3: Concat拼接
+        with open(concat_list, 'w') as f:
+            f.write(f"file '{segment1_path}'\n")
+            if segment2_duration > 0 and os.path.exists(segment2_path):
+                f.write(f"file '{segment2_path}'\n")
+
+        cmd_concat = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0",
+            "-i", concat_list,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            output_path
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result_concat = subprocess.run(cmd_concat, capture_output=True, text=True)
+        if result_concat.returncode != 0:
+            success, error = fallback_reencode(input_path, output_path, start_time, duration)
+            return cam_name, success, "concat_failed->reencode"
 
-        if result.returncode == 0 and os.path.exists(output_path):
-            # 修复 HEVC tag (hev1 -> hvc1) 以兼容 macOS/iOS
+        # 验证输出
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
             fix_hevc_tag(output_path)
-            return cam_name, True, "smartcut"
+            reencode_frames = int(segment1_duration * fps)
+            total_frames = int(duration * fps)
+            return cam_name, True, f"smartcut ({reencode_frames}/{total_frames}f)"
         else:
-            return cam_name, False, result.stderr[:200] if result.stderr else "smartcut failed"
+            success, error = fallback_reencode(input_path, output_path, start_time, duration)
+            return cam_name, success, "verify_failed->reencode"
 
     except Exception as e:
-        return cam_name, False, str(e)
+        return cam_name, False, str(e)[:200]
 
 
 # =============================================================================

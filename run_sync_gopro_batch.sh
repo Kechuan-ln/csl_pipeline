@@ -15,6 +15,9 @@ ANCHOR_VIDEO="/Volumes/FastACIS/csl_11_5/organized/qr_sync.mp4"
 INPUT_BASE="/Volumes/FastACIS/csl_11_5/organized"
 OUTPUT_BASE="/Volumes/FastACIS/csl_11_5/synced"
 
+# Enable pyzbar acceleration (macOS)
+export DYLD_LIBRARY_PATH="/opt/homebrew/opt/zbar/lib:$DYLD_LIBRARY_PATH"
+
 ###########################################
 
 cd "$SCRIPT_DIR"

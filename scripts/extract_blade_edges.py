@@ -210,10 +210,13 @@ def process_dataset(base_dir, dataset_info, output_dir=None):
     if rb_name is None:
         return False, "No blade rigid body found"
 
-    # Find polygon order JSON
-    json_path = data_dir / 'blade_polygon_order.json'
+    # Find polygon order JSON (try blade-specific name first)
+    blade_safe = rb_name.replace(" ", "_")
+    json_path = data_dir / f'blade_polygon_order_{blade_safe}.json'
     if not json_path.exists():
-        return False, "blade_polygon_order.json not found"
+        json_path = data_dir / 'blade_polygon_order.json'
+    if not json_path.exists():
+        return False, f"blade_polygon_order_{blade_safe}.json not found"
 
     with open(json_path) as f:
         order_data = json.load(f)
@@ -304,11 +307,13 @@ def process_dataset(base_dir, dataset_info, output_dir=None):
         aligned_edges[i, :, 0, :] = e1_resampled
         aligned_edges[i, :, 1, :] = e2_resampled
 
-    # Save outputs
-    edge1_path = out_dir / "blade_edge1.npy"
-    edge2_path = out_dir / "blade_edge2.npy"
-    aligned_path = out_dir / "blade_edges.npy"
-    names_path = out_dir / "blade_marker_names.json"
+    # Save outputs (use blade-specific prefix if name isn't generic "Blade")
+    blade_safe = rb_name.replace(" ", "_")
+    prefix = f"{blade_safe}_" if rb_name.lower() != "blade" else "blade_"
+    edge1_path = out_dir / f"{prefix}edge1.npy"
+    edge2_path = out_dir / f"{prefix}edge2.npy"
+    aligned_path = out_dir / f"{prefix}edges.npy"
+    names_path = out_dir / f"{prefix}marker_names.json"
 
     np.save(edge1_path, edge1_data)
     np.save(edge2_path, edge2_data)
@@ -363,7 +368,14 @@ def main():
             return 1
 
         rb_name = args.rigid_body or 'Blade'
-        json_path = args.json or args.csv.parent / 'blade_polygon_order.json'
+        if args.json:
+            json_path = args.json
+        else:
+            # Try blade-specific name first, then fall back to generic
+            blade_safe = rb_name.replace(" ", "_")
+            json_path = args.csv.parent / f'blade_polygon_order_{blade_safe}.json'
+            if not json_path.exists():
+                json_path = args.csv.parent / 'blade_polygon_order.json'
         out_dir = args.output or args.csv.parent
 
         if not json_path.exists():
@@ -403,11 +415,13 @@ def main():
             aligned_edges[i, :, 1, :] = e2
 
         out_dir = Path(out_dir)
-        np.save(out_dir / "blade_edge1.npy", edge1_data)
-        np.save(out_dir / "blade_edge2.npy", edge2_data)
-        np.save(out_dir / "blade_edges.npy", aligned_edges)
+        blade_safe = rb_name.replace(" ", "_")
+        prefix = f"{blade_safe}_" if rb_name.lower() != "blade" else "blade_"
+        np.save(out_dir / f"{prefix}edge1.npy", edge1_data)
+        np.save(out_dir / f"{prefix}edge2.npy", edge2_data)
+        np.save(out_dir / f"{prefix}edges.npy", aligned_edges)
 
-        with open(out_dir / "blade_marker_names.json", 'w') as f:
+        with open(out_dir / f"{prefix}marker_names.json", 'w') as f:
             json.dump({
                 'rigid_body': rb_name,
                 'edge1': edge1_valid,
@@ -416,9 +430,9 @@ def main():
             }, f, indent=2)
 
         print(f"\nSaved to {out_dir}:")
-        print(f"  blade_edge1.npy: {edge1_data.shape}")
-        print(f"  blade_edge2.npy: {edge2_data.shape}")
-        print(f"  aligned_edges.npy: {aligned_edges.shape}")
+        print(f"  {prefix}edge1.npy: {edge1_data.shape}")
+        print(f"  {prefix}edge2.npy: {edge2_data.shape}")
+        print(f"  {prefix}edges.npy: {aligned_edges.shape}")
         return 0
 
     # Mode 2: Use csv_structures.json

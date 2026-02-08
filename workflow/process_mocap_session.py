@@ -3,6 +3,7 @@
 One-command mocap session processor.
 
 Processes a raw Motive session directory (AVI videos + CSV) into pipeline-ready outputs:
+  0. .mcal → cam19_initial.yaml (OptiTrack calibration → OpenCV extrinsics, shared across sessions)
   1. Concat AVI segments → single MP4 (watermark removed)
   2. CSV → skeleton_h36m.npy (17-joint H36M format)
   3. CSV → body_markers.npy (27 Plug-in Gait markers) + leg_markers.npy
@@ -40,6 +41,7 @@ import numpy as np
 from motive_csv_utils import load_motive_csv, detect_skeleton_prefix
 from csv2h36m import convert_csv_to_h36m, detect_amputation_mode
 from extract_markers import extract_body_markers, extract_leg_markers
+from mcal_to_cam19_yaml import load_mcal, find_primecolor_camera, extract_cam19_params, save_cam19_yaml
 
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "ffprobe"
@@ -108,13 +110,19 @@ def concat_avi_to_mp4(avi_files, output_path, remove_watermark=True):
     if remove_watermark:
         vfilters.append(f"drawbox=x={WM_X}:y={WM_Y}:w={WM_W}:h={WM_H}:color=black:t=fill")
 
+    # Use VideoToolbox hardware encoder on macOS if available, else libx264
+    import platform
+    if platform.system() == "Darwin":
+        enc_args = ["-c:v", "h264_videotoolbox", "-q:v", "65", "-pix_fmt", "yuv420p"]
+    else:
+        enc_args = ["-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p"]
+
     if len(avi_files) == 1:
         # Single file, direct conversion
         cmd = [FFMPEG, "-y", "-i", avi_files[0]]
         if vfilters:
             cmd.extend(["-vf", ",".join(vfilters)])
-        cmd.extend(["-c:v", "libx264", "-crf", "18", "-preset", "fast",
-                     "-pix_fmt", "yuv420p", "-an", output_path])
+        cmd.extend(enc_args + ["-an", output_path])
     else:
         # Multiple segments: use concat demuxer
         concat_list = tempfile.NamedTemporaryFile(mode="w", suffix=".txt",
@@ -128,8 +136,7 @@ def concat_avi_to_mp4(avi_files, output_path, remove_watermark=True):
                    "-i", concat_list.name]
             if vfilters:
                 cmd.extend(["-vf", ",".join(vfilters)])
-            cmd.extend(["-c:v", "libx264", "-crf", "18", "-preset", "fast",
-                         "-pix_fmt", "yuv420p", "-an", output_path])
+            cmd.extend(enc_args + ["-an", output_path])
         finally:
             # Will be cleaned up after ffmpeg runs
             pass
@@ -326,257 +333,428 @@ def generate_blade_editor_html(blade_name, marker_positions, output_path):
     """
     Generate an interactive HTML page for defining blade edge ordering.
 
-    Uses Plotly.js for 3D visualization. User clicks markers to define edge1/edge2,
-    then exports blade_polygon_order.json.
+    Uses Three.js for 3D visualization with raycasting, ruling lines,
+    keyboard shortcuts, and direct marker clicking.
     """
     markers_json = json.dumps(marker_positions)
-    blade_name_safe = blade_name.replace("'", "\\'")
+    blade_name_safe = blade_name.replace("'", "\\'").replace(" ", "_")
+    n_markers = len(marker_positions)
+    export_filename = f"blade_polygon_order_{blade_name_safe}.json"
 
-    html = f"""<!DOCTYPE html>
-<html>
+    # No f-string double-brace issues: we use a raw template with explicit substitution
+    html = """<!DOCTYPE html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<title>Blade Polygon Editor - {blade_name}</title>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BLADE_TITLE Edge Editor</title>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }}
-  h1 {{ color: #e94560; }}
-  .container {{ display: flex; gap: 20px; }}
-  #plot {{ flex: 1; height: 700px; border: 1px solid #444; border-radius: 8px; }}
-  .panel {{ width: 300px; }}
-  .edge-list {{ background: #16213e; border-radius: 8px; padding: 15px; margin-bottom: 15px; }}
-  .edge-list h3 {{ margin-top: 0; }}
-  .marker-item {{ padding: 4px 8px; margin: 2px 0; border-radius: 4px; cursor: pointer; display: flex; justify-content: space-between; }}
-  .marker-item:hover {{ background: #333; }}
-  .marker-item .remove {{ color: #e94560; cursor: pointer; font-weight: bold; }}
-  .edge1 .marker-item {{ background: #0a3d62; }}
-  .edge2 .marker-item {{ background: #6a0572; }}
-  button {{ padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; margin: 5px; }}
-  .btn-edge1 {{ background: #1e88e5; color: white; }}
-  .btn-edge2 {{ background: #9c27b0; color: white; }}
-  .btn-export {{ background: #4caf50; color: white; font-size: 16px; padding: 12px 30px; }}
-  .btn-clear {{ background: #e94560; color: white; }}
-  .btn-undo {{ background: #ff9800; color: white; }}
-  .info {{ background: #16213e; padding: 10px; border-radius: 8px; margin-bottom: 15px; font-size: 13px; }}
-  .selected-marker {{ font-weight: bold; color: #ffd700; }}
-  #status {{ padding: 10px; background: #16213e; border-radius: 8px; margin-top: 10px; }}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden; background: #1a1a2e; color: #fff; }
+  #container { width: 100vw; height: 100vh; }
+  #loading-overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: #1a1a2e; z-index: 9999; display: flex;
+    justify-content: center; align-items: center; flex-direction: column;
+  }
+  .spinner {
+    width: 50px; height: 50px; border: 5px solid #333;
+    border-top: 5px solid #4fc3f7; border-radius: 50%;
+    animation: spin 1s linear infinite; margin-bottom: 20px;
+  }
+  @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  #ui-panel {
+    position: absolute; top: 10px; left: 10px;
+    background: rgba(30, 30, 50, 0.95); padding: 15px;
+    border-radius: 10px; color: #fff; min-width: 320px; max-width: 380px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+  }
+  #ui-panel h2 { margin-bottom: 10px; color: #4fc3f7; font-size: 16px; }
+  #ui-panel p { font-size: 11px; color: #aaa; margin-bottom: 10px; line-height: 1.4; }
+  .edge-toggle { display: flex; margin: 10px 0; gap: 5px; }
+  .edge-btn {
+    flex: 1; padding: 10px; border: 2px solid; border-radius: 8px;
+    font-weight: bold; cursor: pointer; text-align: center;
+    transition: all 0.2s; user-select: none;
+  }
+  .edge-btn.edge1 { border-color: #4fc3f7; background: transparent; color: #4fc3f7; }
+  .edge-btn.edge1.active { background: #4fc3f7; color: #1a1a2e; }
+  .edge-btn.edge2 { border-color: #ff7043; background: transparent; color: #ff7043; }
+  .edge-btn.edge2.active { background: #ff7043; color: #1a1a2e; }
+  .edge-section {
+    background: rgba(0,0,0,0.3); padding: 8px; border-radius: 5px;
+    margin: 8px 0; max-height: 150px; overflow-y: auto;
+  }
+  .edge-section h3 { font-size: 12px; margin-bottom: 5px; display: flex; justify-content: space-between; }
+  .edge-section.edge1 h3 { color: #4fc3f7; }
+  .edge-section.edge2 h3 { color: #ff7043; }
+  .edge-item {
+    display: inline-block; padding: 2px 6px; margin: 2px;
+    border-radius: 3px; font-size: 10px; font-family: monospace;
+  }
+  .edge-item.edge1 { background: rgba(79, 195, 247, 0.3); color: #4fc3f7; }
+  .edge-item.edge2 { background: rgba(255, 112, 67, 0.3); color: #ff7043; }
+  button {
+    background: #555; color: #fff; border: none;
+    padding: 8px 12px; border-radius: 5px; cursor: pointer;
+    font-weight: bold; margin: 3px;
+  }
+  button:hover { background: #666; }
+  button:disabled { background: #333; color: #666; cursor: not-allowed; }
+  #export-btn { background: #66bb6a; color: #1a1a2e; }
+  #export-btn:hover { background: #81c784; }
+  #export-btn:disabled { background: #333; color: #666; }
+  #status {
+    margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.3);
+    border-radius: 5px; font-size: 11px;
+  }
+  #help-panel {
+    position: absolute; bottom: 10px; left: 10px;
+    background: rgba(30, 30, 50, 0.9); padding: 10px 15px;
+    border-radius: 8px; color: #888; font-size: 11px; pointer-events: none;
+  }
+  #help-panel kbd { background: #333; padding: 2px 6px; border-radius: 3px; margin: 0 2px; }
+  #ruling-toggle { margin-top: 10px; display: flex; align-items: center; gap: 10px; }
+  #ruling-toggle label { font-size: 12px; color: #aaa; }
 </style>
 </head>
 <body>
-<h1>Blade Polygon Editor: {blade_name}</h1>
-<div class="info">
-  Click a marker in the 3D plot, then assign it to Edge 1 or Edge 2.
-  Markers are ordered by click sequence. Export when done.
+<div id="loading-overlay">
+  <div class="spinner"></div>
+  <div id="loading-text">Loading 3D Engine...</div>
 </div>
-<div class="container">
-  <div id="plot"></div>
-  <div class="panel">
-    <div>
-      <button class="btn-edge1" onclick="assignToEdge(1)">+ Edge 1 (blue)</button>
-      <button class="btn-edge2" onclick="assignToEdge(2)">+ Edge 2 (purple)</button>
-      <button class="btn-undo" onclick="undoLast()">Undo</button>
-    </div>
-    <div class="edge-list edge1">
-      <h3 style="color:#1e88e5">Edge 1 (<span id="e1count">0</span> markers)</h3>
-      <div id="edge1list"></div>
-    </div>
-    <div class="edge-list edge2">
-      <h3 style="color:#9c27b0">Edge 2 (<span id="e2count">0</span> markers)</h3>
-      <div id="edge2list"></div>
-    </div>
-    <div>
-      <button class="btn-export" onclick="exportJSON()">Export JSON</button>
-      <button class="btn-clear" onclick="clearAll()">Clear All</button>
-    </div>
-    <div id="status">Ready. Click a marker to select it.</div>
+<div id="container"></div>
+<div id="ui-panel">
+  <h2>BLADE_TITLE Edge Editor (NUM_MARKERS markers)</h2>
+  <p>1. Select <b>Edge 1</b> and click markers along one blade edge<br>
+     2. Switch to <b>Edge 2</b> and click markers along the other edge<br>
+     3. Edges should have same direction (both tip-to-base or both base-to-tip)</p>
+  <div class="edge-toggle">
+    <div class="edge-btn edge1 active" id="btn-edge1">Edge 1 (Blue)</div>
+    <div class="edge-btn edge2" id="btn-edge2">Edge 2 (Orange)</div>
   </div>
+  <div class="edge-section edge1">
+    <h3><span>Edge 1</span><span id="edge1-count">0 markers</span></h3>
+    <div class="edge-list" id="edge1-list">-</div>
+  </div>
+  <div class="edge-section edge2">
+    <h3><span>Edge 2</span><span id="edge2-count">0 markers</span></h3>
+    <div class="edge-list" id="edge2-list">-</div>
+  </div>
+  <div id="ruling-toggle">
+    <input type="checkbox" id="show-rulings" checked>
+    <label for="show-rulings">Show ruling lines (edge connections)</label>
+  </div>
+  <div style="margin-top: 10px;">
+    <button id="undo-btn">Undo</button>
+    <button id="reset-btn">Reset All</button>
+    <button id="export-btn" disabled>Export JSON</button>
+  </div>
+  <div id="status">Click markers to define edges</div>
 </div>
+<div id="help-panel">
+  <kbd>Left drag</kbd> Rotate | <kbd>Right drag</kbd> Pan | <kbd>Scroll</kbd> Zoom |
+  <kbd>1</kbd> Edge1 | <kbd>2</kbd> Edge2 | <kbd>Z</kbd> Undo | <kbd>R</kbd> Reset view
+</div>
+
 <script>
-const markerData = {markers_json};
-const bladeName = '{blade_name_safe}';
-const markerNames = Object.keys(markerData).sort((a,b) => {{
-  const na = parseInt(a.replace(/\\D/g,'')) || 0;
-  const nb = parseInt(b.replace(/\\D/g,'')) || 0;
-  return na - nb;
-}});
+  window.MARKER_DATA = MARKER_JSON;
+  window.BLADE_NAME = 'BLADE_SAFE';
+  window.EXPORT_FILENAME = 'EXPORT_FN';
+</script>
 
-let selectedMarker = null;
-let edge1 = [];
-let edge2 = [];
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-// Colors
-const COL_DEFAULT = '#aaaaaa';
-const COL_SELECTED = '#ffd700';
-const COL_EDGE1 = '#1e88e5';
-const COL_EDGE2 = '#9c27b0';
+const markerData = window.MARKER_DATA;
+const bladeName = window.BLADE_NAME;
+const exportFilename = window.EXPORT_FILENAME;
+const loadingOverlay = document.getElementById('loading-overlay');
 
-function getMarkerColor(name) {{
-  if (name === selectedMarker) return COL_SELECTED;
-  if (edge1.includes(name)) return COL_EDGE1;
-  if (edge2.includes(name)) return COL_EDGE2;
-  return COL_DEFAULT;
-}}
+try { init(); loadingOverlay.style.display = 'none'; }
+catch (e) {
+  console.error(e);
+  document.getElementById('loading-text').innerHTML = 'Error: ' + e.message;
+  document.getElementById('loading-text').style.color = '#ff5555';
+}
 
-function buildTraces() {{
-  // Unassigned markers
-  const unassigned = markerNames.filter(n => !edge1.includes(n) && !edge2.includes(n));
+function init() {
+  const container = document.getElementById('container');
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a1a2e);
+  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 10000);
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  container.appendChild(renderer.domElement);
 
-  const traces = [];
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.05;
 
-  // Unassigned scatter
-  if (unassigned.length > 0) {{
-    traces.push({{
-      x: unassigned.map(n => markerData[n][0]),
-      y: unassigned.map(n => markerData[n][1]),
-      z: unassigned.map(n => markerData[n][2]),
-      text: unassigned,
-      mode: 'markers+text',
-      type: 'scatter3d',
-      name: 'Unassigned',
-      marker: {{
-        size: 6,
-        color: unassigned.map(n => n === selectedMarker ? COL_SELECTED : COL_DEFAULT),
-        line: {{ width: 1, color: '#fff' }}
-      }},
-      textposition: 'top center',
-      textfont: {{ size: 10, color: '#ccc' }}
-    }});
-  }}
+  scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  dirLight.position.set(100, 200, 100);
+  scene.add(dirLight);
+  scene.add(new THREE.GridHelper(500, 20, 0x444444, 0x333333));
+  scene.add(new THREE.AxesHelper(100));
 
-  // Edge 1 markers + line
-  if (edge1.length > 0) {{
-    traces.push({{
-      x: edge1.map(n => markerData[n][0]),
-      y: edge1.map(n => markerData[n][1]),
-      z: edge1.map(n => markerData[n][2]),
-      text: edge1.map((n,i) => `E1[${{i}}] ${{n}}`),
-      mode: 'markers+text+lines',
-      type: 'scatter3d',
-      name: 'Edge 1',
-      marker: {{ size: 8, color: COL_EDGE1, symbol: 'diamond' }},
-      line: {{ color: COL_EDGE1, width: 4 }},
-      textposition: 'top center',
-      textfont: {{ size: 10, color: COL_EDGE1 }}
-    }});
-  }}
+  const COLORS = { unselected: 0x888888, edge1: 0x4fc3f7, edge2: 0xff7043, ruling: 0x66bb6a };
+  const markerNames = Object.keys(markerData);
+  let cx = 0, cy = 0, cz = 0;
+  markerNames.forEach(n => { cx += markerData[n][0]; cy += markerData[n][1]; cz += markerData[n][2]; });
+  cx /= markerNames.length; cy /= markerNames.length; cz /= markerNames.length;
 
-  // Edge 2 markers + line
-  if (edge2.length > 0) {{
-    traces.push({{
-      x: edge2.map(n => markerData[n][0]),
-      y: edge2.map(n => markerData[n][1]),
-      z: edge2.map(n => markerData[n][2]),
-      text: edge2.map((n,i) => `E2[${{i}}] ${{n}}`),
-      mode: 'markers+text+lines',
-      type: 'scatter3d',
-      name: 'Edge 2',
-      marker: {{ size: 8, color: COL_EDGE2, symbol: 'diamond' }},
-      line: {{ color: COL_EDGE2, width: 4 }},
-      textposition: 'top center',
-      textfont: {{ size: 10, color: COL_EDGE2 }}
-    }});
-  }}
+  const markerMeshes = {};
+  const markerLabels = {};
+  const sphereRadius = 6;
 
-  return traces;
-}}
+  markerNames.forEach(name => {
+    const pos = markerData[name];
+    const x = pos[0] - cx, y = pos[1] - cy, z = pos[2] - cz;
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(sphereRadius, 16, 16),
+      new THREE.MeshPhongMaterial({ color: COLORS.unselected, emissive: 0x222222 })
+    );
+    sphere.position.set(x, y, z);
+    sphere.userData.markerName = name;
+    scene.add(sphere);
+    markerMeshes[name] = sphere;
 
-const layout = {{
-  scene: {{
-    xaxis: {{ title: 'X (mm)' }},
-    yaxis: {{ title: 'Y (mm)' }},
-    zaxis: {{ title: 'Z (mm)' }},
-    aspectmode: 'data',
-    bgcolor: '#0f3460'
-  }},
-  paper_bgcolor: '#1a1a2e',
-  font: {{ color: '#eee' }},
-  margin: {{ l: 0, r: 0, t: 0, b: 0 }},
-  showlegend: true,
-  legend: {{ x: 0, y: 1, bgcolor: 'rgba(0,0,0,0.5)' }}
-}};
+    const nameLabel = createTextLabel(name.replace('Marker ', ''));
+    nameLabel.position.set(x, y - sphereRadius - 10, z);
+    scene.add(nameLabel);
 
-Plotly.newPlot('plot', buildTraces(), layout);
+    const label = createIndexLabel('');
+    label.position.set(x, y + sphereRadius + 8, z);
+    label.visible = false;
+    scene.add(label);
+    markerLabels[name] = label;
+  });
 
-document.getElementById('plot').on('plotly_click', function(data) {{
-  if (data.points.length > 0) {{
-    const pt = data.points[0];
-    const name = pt.text.replace(/^E[12]\\[\\d+\\] /, '');
-    selectedMarker = name;
-    document.getElementById('status').textContent = `Selected: ${{name}}`;
-    Plotly.react('plot', buildTraces(), layout);
-  }}
-}});
+  function createTextLabel(text) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#666'; ctx.font = '18px Arial';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, 32, 16);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas) }));
+    sprite.scale.set(20, 10, 1);
+    return sprite;
+  }
 
-function assignToEdge(edgeNum) {{
-  if (!selectedMarker) {{
-    document.getElementById('status').textContent = 'No marker selected. Click a marker first.';
-    return;
-  }}
-  // Remove from other edge if present
-  edge1 = edge1.filter(n => n !== selectedMarker);
-  edge2 = edge2.filter(n => n !== selectedMarker);
+  function createIndexLabel(text, color = '#4fc3f7') {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    const texture = new THREE.CanvasTexture(canvas);
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture }));
+    sprite.scale.set(14, 14, 1);
+    sprite.userData = { canvas, ctx, texture };
+    updateIndexLabel(sprite, text, color);
+    return sprite;
+  }
 
-  if (edgeNum === 1) edge1.push(selectedMarker);
-  else edge2.push(selectedMarker);
+  function updateIndexLabel(sprite, text, color = '#4fc3f7') {
+    const { ctx, texture } = sprite.userData;
+    ctx.clearRect(0, 0, 64, 64);
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(32, 32, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1a1a2e'; ctx.font = 'bold 24px Arial';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, 32, 32);
+    texture.needsUpdate = true;
+  }
 
-  selectedMarker = null;
+  let currentEdge = 1;
+  let edge1 = [], edge2 = [];
+  let edge1Lines = [], edge2Lines = [];
+  let rulingLines = [];
+  let showRulings = true;
+
+  camera.position.set(0, 200, 400);
+  controls.target.set(0, 0, 0);
+  controls.update();
+
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
+
+  function onMouseClick(event) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObjects(Object.values(markerMeshes));
+    if (intersects.length > 0) {
+      const name = intersects[0].object.userData.markerName;
+      if (!edge1.includes(name) && !edge2.includes(name)) selectMarker(name);
+    }
+  }
+
+  function selectMarker(name) {
+    const edge = currentEdge === 1 ? edge1 : edge2;
+    const color = currentEdge === 1 ? COLORS.edge1 : COLORS.edge2;
+    const colorHex = currentEdge === 1 ? '#4fc3f7' : '#ff7043';
+    const lines = currentEdge === 1 ? edge1Lines : edge2Lines;
+
+    markerMeshes[name].material.color.setHex(color);
+    markerMeshes[name].material.emissive.setHex(currentEdge === 1 ? 0x112233 : 0x331111);
+
+    updateIndexLabel(markerLabels[name], (edge.length + 1).toString(), colorHex);
+    markerLabels[name].visible = true;
+
+    if (edge.length > 0) {
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          markerMeshes[edge[edge.length - 1]].position.clone(),
+          markerMeshes[name].position.clone()
+        ]),
+        new THREE.LineBasicMaterial({ color: color, linewidth: 2 })
+      );
+      scene.add(line);
+      lines.push(line);
+    }
+    edge.push(name);
+    updateRulingLines();
+    updateUI();
+  }
+
+  function updateRulingLines() {
+    rulingLines.forEach(l => scene.remove(l));
+    rulingLines = [];
+    if (!showRulings) return;
+    const n = Math.min(edge1.length, edge2.length);
+    for (let i = 0; i < n; i++) {
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          markerMeshes[edge1[i]].position.clone(),
+          markerMeshes[edge2[i]].position.clone()
+        ]),
+        new THREE.LineDashedMaterial({ color: COLORS.ruling, dashSize: 5, gapSize: 5, opacity: 0.6, transparent: true })
+      );
+      line.computeLineDistances();
+      scene.add(line);
+      rulingLines.push(line);
+    }
+  }
+
+  window.setCurrentEdge = function(edgeNum) {
+    currentEdge = edgeNum;
+    document.getElementById('btn-edge1').classList.toggle('active', edgeNum === 1);
+    document.getElementById('btn-edge2').classList.toggle('active', edgeNum === 2);
+  };
+
+  window.undo = function() {
+    const edge = currentEdge === 1 ? edge1 : edge2;
+    const lines = currentEdge === 1 ? edge1Lines : edge2Lines;
+    if (edge.length === 0) return;
+    const name = edge.pop();
+    markerMeshes[name].material.color.setHex(COLORS.unselected);
+    markerMeshes[name].material.emissive.setHex(0x222222);
+    markerLabels[name].visible = false;
+    if (lines.length > 0) scene.remove(lines.pop());
+    updateRulingLines();
+    updateUI();
+  };
+
+  window.reset = function() {
+    [edge1, edge2].forEach(edge => edge.forEach(n => {
+      markerMeshes[n].material.color.setHex(COLORS.unselected);
+      markerMeshes[n].material.emissive.setHex(0x222222);
+      markerLabels[n].visible = false;
+    }));
+    edge1Lines.forEach(l => scene.remove(l));
+    edge2Lines.forEach(l => scene.remove(l));
+    rulingLines.forEach(l => scene.remove(l));
+    edge1 = []; edge2 = [];
+    edge1Lines = []; edge2Lines = [];
+    rulingLines = [];
+    window.setCurrentEdge(1);
+    updateUI();
+  };
+
+  window.exportJSON = function() {
+    const data = { edge1, edge2, rigid_body: bladeName };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = exportFilename;
+    a.click();
+    document.getElementById('status').textContent = 'Exported ' + exportFilename + '!';
+    document.getElementById('status').style.color = '#66bb6a';
+  };
+
+  function updateUI() {
+    document.getElementById('edge1-count').textContent = edge1.length + ' markers';
+    document.getElementById('edge1-list').innerHTML = edge1.length > 0
+      ? edge1.map((n, i) => '<span class="edge-item edge1">' + (i+1) + ':' + n.replace('Marker ','') + '</span>').join('')
+      : '-';
+    document.getElementById('edge2-count').textContent = edge2.length + ' markers';
+    document.getElementById('edge2-list').innerHTML = edge2.length > 0
+      ? edge2.map((n, i) => '<span class="edge-item edge2">' + (i+1) + ':' + n.replace('Marker ','') + '</span>').join('')
+      : '-';
+    const status = document.getElementById('status');
+    if (edge1.length > 0 && edge2.length > 0) {
+      if (edge1.length === edge2.length) {
+        status.textContent = 'Ready! Both edges have ' + edge1.length + ' markers';
+        status.style.color = '#66bb6a';
+      } else {
+        status.textContent = 'Edge lengths differ: ' + edge1.length + ' vs ' + edge2.length;
+        status.style.color = '#ffb74d';
+      }
+    } else {
+      status.textContent = 'Defining Edge ' + currentEdge + '... (click markers in order)';
+      status.style.color = '#aaa';
+    }
+    document.getElementById('export-btn').disabled = !(edge1.length >= 2 && edge2.length >= 2);
+  }
+
+  document.getElementById('btn-edge1').onclick = () => window.setCurrentEdge(1);
+  document.getElementById('btn-edge2').onclick = () => window.setCurrentEdge(2);
+  document.getElementById('undo-btn').onclick = window.undo;
+  document.getElementById('reset-btn').onclick = window.reset;
+  document.getElementById('export-btn').onclick = window.exportJSON;
+  renderer.domElement.addEventListener('click', onMouseClick);
+  document.getElementById('show-rulings').addEventListener('change', e => {
+    showRulings = e.target.checked;
+    updateRulingLines();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === '1') window.setCurrentEdge(1);
+    if (e.key === '2') window.setCurrentEdge(2);
+    if (e.key === 'z' || e.key === 'Z') window.undo();
+    if (e.key === 'r' || e.key === 'R') {
+      camera.position.set(0, 200, 400);
+      controls.target.set(0, 0, 0);
+      controls.update();
+    }
+  });
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
+  animate();
   updateUI();
-}}
-
-function undoLast() {{
-  if (edge2.length > 0 && (edge1.length === 0 || edge2.length >= edge1.length)) {{
-    edge2.pop();
-  }} else if (edge1.length > 0) {{
-    edge1.pop();
-  }}
-  updateUI();
-}}
-
-function clearAll() {{
-  edge1 = [];
-  edge2 = [];
-  selectedMarker = null;
-  updateUI();
-}}
-
-function updateUI() {{
-  document.getElementById('e1count').textContent = edge1.length;
-  document.getElementById('e2count').textContent = edge2.length;
-
-  let html1 = edge1.map((n,i) => `<div class="marker-item"><span>[${{i}}] ${{n}}</span><span class="remove" onclick="removeFromEdge(1,${{i}})">&times;</span></div>`).join('');
-  let html2 = edge2.map((n,i) => `<div class="marker-item"><span>[${{i}}] ${{n}}</span><span class="remove" onclick="removeFromEdge(2,${{i}})">&times;</span></div>`).join('');
-
-  document.getElementById('edge1list').innerHTML = html1;
-  document.getElementById('edge2list').innerHTML = html2;
-
-  Plotly.react('plot', buildTraces(), layout);
-  document.getElementById('status').textContent = `Edge1: ${{edge1.length}}, Edge2: ${{edge2.length}}`;
-}}
-
-function removeFromEdge(edgeNum, idx) {{
-  if (edgeNum === 1) edge1.splice(idx, 1);
-  else edge2.splice(idx, 1);
-  updateUI();
-}}
-
-function exportJSON() {{
-  if (edge1.length < 2 || edge2.length < 2) {{
-    alert('Each edge needs at least 2 markers.');
-    return;
-  }}
-  const data = {{ edge1: edge1, edge2: edge2 }};
-  const blob = new Blob([JSON.stringify(data, null, 2)], {{ type: 'application/json' }});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'blade_polygon_order.json';
-  a.click();
-  URL.revokeObjectURL(url);
-  document.getElementById('status').textContent = 'Exported blade_polygon_order.json! Move it to the session output folder.';
-}}
+}
 </script>
 </body>
 </html>"""
+
+    # Substitute template placeholders (avoids f-string double-brace issues with JS)
+    html = html.replace("BLADE_TITLE", blade_name)
+    html = html.replace("NUM_MARKERS", str(n_markers))
+    html = html.replace("MARKER_JSON", markers_json)
+    html = html.replace("BLADE_SAFE", blade_name_safe)
+    html = html.replace("EXPORT_FN", export_filename)
+
     with open(output_path, "w") as f:
         f.write(html)
     return True
@@ -613,6 +791,33 @@ def process_session(session_dir, output_dir):
 
     success = True
 
+    # Step 0: .mcal → cam19_initial.yaml
+    cam19_path = os.path.join(output_dir, "cam19_initial.yaml")
+    if os.path.exists(cam19_path):
+        print(f"\n  [Step 0] cam19_initial.yaml already exists, skipping")
+    else:
+        # Search for .mcal in session dir, then parent dir
+        mcal_files = glob.glob(os.path.join(session_dir, "*.mcal"))
+        if not mcal_files:
+            parent_dir = os.path.dirname(session_dir)
+            mcal_files = glob.glob(os.path.join(parent_dir, "*.mcal"))
+        if mcal_files:
+            mcal_path = mcal_files[0]
+            print(f"\n  [Step 0] mcal → cam19_initial.yaml")
+            print(f"  mcal: {os.path.basename(mcal_path)}")
+            try:
+                mcal_root = load_mcal(mcal_path)
+                cam_elem, cid = find_primecolor_camera(mcal_root)
+                K, dist, rvec, tvec, R = extract_cam19_params(cam_elem)
+                save_cam19_yaml(cam19_path, K, dist, rvec, tvec, R)
+                print(f"  [Step 0] Saved: {cam19_path}")
+                print(f"  K: fx={K[0,0]:.1f} fy={K[1,1]:.1f} cx={K[0,2]:.1f} cy={K[1,2]:.1f}")
+            except Exception as e:
+                print(f"  [Step 0] FAILED: {e}")
+                success = False
+        else:
+            print(f"\n  [Step 0] No .mcal file found, skipping cam19 extraction")
+
     # Step 1: AVI → MP4
     video_path = os.path.join(output_dir, "video.mp4")
     if avi_files:
@@ -644,12 +849,14 @@ def process_session(session_dir, output_dir):
         print(f"  No blade rigid bodies found")
     else:
         for blade_name, markers in blades.items():
-            json_path = os.path.join(output_dir, "blade_polygon_order.json")
+            blade_safe = blade_name.replace(" ", "_")
+            json_name = f"blade_polygon_order_{blade_safe}.json"
+            json_path = os.path.join(output_dir, json_name)
             if os.path.exists(json_path):
-                print(f"  {blade_name}: blade_polygon_order.json already exists, skipping editor")
+                print(f"  {blade_name}: {json_name} already exists, skipping editor")
                 continue
 
-            html_name = f"blade_editor_{blade_name.replace(' ', '_')}.html"
+            html_name = f"blade_editor_{blade_safe}.html"
             html_path = os.path.join(output_dir, html_name)
 
             positions, frame_idx = extract_blade_marker_positions(
@@ -660,7 +867,7 @@ def process_session(session_dir, output_dir):
             if positions:
                 generate_blade_editor_html(blade_name, positions, html_path)
                 print(f"  Generated: {html_path}")
-                print(f"  → Open in browser, define edges, export blade_polygon_order.json")
+                print(f"  → Open in browser, define edges, export {json_name}")
 
     # Summary
     print(f"\n{'=' * 70}")
