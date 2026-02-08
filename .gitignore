@@ -1,16 +1,141 @@
+# ============================================
+# CSL Pipeline - Git Ignore Configuration
+# ============================================
+
+# Claude Code local files (development artifacts)
+.claude/
+thoughts/ledgers/
+thoughts/shared/cache/
+
+# Python
+# ------
 __pycache__/
-*.pyc
-*.pyo
-.DS_Store
-*.bak
-*.egg-info/
-dist/
-build/
-.eggs/
+*.py[cod]
+*$py.class
 *.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Virtual Environments
+# --------------------
+venv/
+env/
+ENV/
+.venv/
+camcalib/
+
+# IDE / Editors
+# -------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Operating System
+# ----------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Data Files (Large)
+# ------------------
+# Raw video files
+*.avi
+*.mp4
+*.MP4
+*.mov
+*.MOV
+
+# Mocap data
+*.csv
+*.c3d
+*.mcal
+
+# Numpy arrays and processed data
 *.npy
 *.npz
-*.mp4
-*.avi
-*.jpg
-*.png
+
+# Calibration outputs (exclude from repo)
+calibration.json
+*_refined.yaml
+sync_mapping.json
+camera_offsets.json
+
+# Images (keep sample images, ignore bulk exports)
+extracted_frames/
+original/
+original_stable/
+
+# Temporary / Cache
+# -----------------
+*.log
+*.tmp
+.cache/
+tmp/
+temp/
+
+# Output directories
+# ----------------------------------
+synced/
+organized/
+output/
+
+# Keep these important files
+# ---------------------------
+!intrinsic_all_17_cameras.json
+!multical/asset/*.yaml
+!*.md
+!CLAUDE.md
+!README.md
+
+# Documentation artifacts
+# -----------------------
+*.pdf
+*.docx
+
+# Jupyter Notebooks checkpoints
+.ipynb_checkpoints/
+
+# Test coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
