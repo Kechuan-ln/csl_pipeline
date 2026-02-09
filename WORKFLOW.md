@@ -592,16 +592,16 @@ Use the interactive marker-pairing tool to refine cam19 extrinsics. This step re
 
 ```bash
 cd /Volumes/FastACIS/annotation_pipeline/csl_pipeline
-SYNCED=/Volumes/FastACIS/csl_11_5/synced/P4_1_sync/cameras_synced
 
+# Convenience mode (cam19 auto-detected as direct mode):
 python post_calibration/refine_extrinsics.py \
-    --markers /Volumes/T7/csl/P4_1/body_markers.npy \
-    --names /Volumes/T7/csl/P4_1/body_marker_names.json \
-    --video ${SYNCED}/cam19/primecolor_synced.mp4 \
-    --camera ${SYNCED}/cam19_initial.yaml \
-    --output ${SYNCED}/cam19_refined.yaml \
-    --sync ${SYNCED}/cam19/sync_mapping.json
+    --session P4_1 --cam cam19 \
+    --markers-base /Volumes/T7/csl \
+    --synced-base /Volumes/FastACIS/csl_11_5/synced \
+    --camera /Volumes/FastACIS/csl_11_5/synced/P4_1_sync/cameras_synced/cam19_initial.yaml
 ```
+
+Note: `--camera` override is needed here because the initial YAML is `cam19_initial.yaml`, not the default `individual_cam_params/cam19.yaml`.
 
 **Controls:**
 
@@ -910,19 +910,16 @@ Use P4_1's cam19_refined.yaml as the initial estimate (the physical setup change
 
 ```bash
 cd /Volumes/FastACIS/annotation_pipeline/csl_pipeline
-SESSION=P6_4
-SYNCED=/Volumes/FastACIS/csl_11_5/synced/${SESSION}_sync/cameras_synced
 
+# Convenience mode with --camera override (use P4_1's refined yaml as initial estimate)
 python post_calibration/refine_extrinsics.py \
-    --markers /Volumes/T7/csl/${SESSION}/body_markers.npy \
-    --names /Volumes/T7/csl/${SESSION}/body_marker_names.json \
-    --video ${SYNCED}/cam19/primecolor_synced.mp4 \
-    --camera /Volumes/FastACIS/csl_11_5/synced/P4_1_sync/cameras_synced/cam19_refined.yaml \
-    --output ${SYNCED}/cam19_refined.yaml \
-    --sync ${SYNCED}/cam19/sync_mapping.json
+    --session P6_4 --cam cam19 \
+    --markers-base /Volumes/T7/csl \
+    --synced-base /Volumes/FastACIS/csl_11_5/synced \
+    --camera /Volumes/FastACIS/csl_11_5/synced/P4_1_sync/cameras_synced/cam19_refined.yaml
 ```
 
-Note: `--camera` points to **P4_1's** cam19_refined.yaml as the initial estimate.
+Note: `--camera` override points to **P4_1's** cam19_refined.yaml as the initial estimate. Other paths (video, output, sync) are auto-derived.
 
 ### Step B2: Generate Individual YAMLs
 
@@ -945,20 +942,13 @@ If a specific GoPro's calibration is slightly off, you can refine it independent
 
 ```bash
 cd /Volumes/FastACIS/annotation_pipeline/csl_pipeline
-SESSION=P6_4
-SYNCED=/Volumes/FastACIS/csl_11_5/synced/${SESSION}_sync/cameras_synced
-CAM=cam1  # Replace with target camera
 
+# Convenience mode: all paths auto-derived from session + cam
 python post_calibration/refine_extrinsics.py \
-    --markers /Volumes/T7/csl/${SESSION}/body_markers.npy \
-    --names /Volumes/T7/csl/${SESSION}/body_marker_names.json \
-    --video ${SYNCED}/${CAM}/${SESSION}.MP4 \
-    --camera ${SYNCED}/individual_cam_params/${CAM}.yaml \
-    --output ${SYNCED}/individual_cam_params/${CAM}.yaml \
-    --sync ${SYNCED}/cam19/sync_mapping.json
+    --session P6_4 --cam cam1 \
+    --markers-base /Volumes/T7/csl \
+    --synced-base /Volumes/FastACIS/csl_11_5/synced
 ```
-
-Note: GoPro video filenames use uppercase `.MP4`.
 
 ### Batch Processing All Sessions
 
@@ -973,15 +963,12 @@ cd /Volumes/FastACIS/annotation_pipeline/csl_pipeline
 
 # 2. Refine cam19 for each session (interactive, one at a time)
 for SESSION in P4_2 P4_3 P4_4 P4_5 P5_1 P5_2 P5_3 P5_5 P6_1 P6_2 P6_3 P6_4 P6_5; do
-    SYNCED=/Volumes/FastACIS/csl_11_5/synced/${SESSION}_sync/cameras_synced
     echo "=== Refining cam19 for ${SESSION} ==="
     python post_calibration/refine_extrinsics.py \
-        --markers /Volumes/T7/csl/${SESSION}/body_markers.npy \
-        --names /Volumes/T7/csl/${SESSION}/body_marker_names.json \
-        --video ${SYNCED}/cam19/primecolor_synced.mp4 \
-        --camera /Volumes/FastACIS/csl_11_5/synced/P4_1_sync/cameras_synced/cam19_refined.yaml \
-        --output ${SYNCED}/cam19_refined.yaml \
-        --sync ${SYNCED}/cam19/sync_mapping.json
+        --session ${SESSION} --cam cam19 \
+        --markers-base /Volumes/T7/csl \
+        --synced-base /Volumes/FastACIS/csl_11_5/synced \
+        --camera /Volumes/FastACIS/csl_11_5/synced/P4_1_sync/cameras_synced/cam19_refined.yaml
 done
 
 # 3. Generate individual YAMLs for all sessions

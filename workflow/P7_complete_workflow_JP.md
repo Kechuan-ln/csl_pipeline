@@ -95,6 +95,15 @@ P7_gopro/
 
 **必要な理由**：生データはカメラごと構造、パイプラインはセッションごと構造が必要。
 
+**動作原理**：
+- 各`cam*/`ディレクトリ内のMP4ファイルをスキャン
+- ファイル名の番号順にソート（GoProの自動連番 = 録画時間順）
+- 各カメラの**N番目のビデオ = N番目のセッション**と仮定
+- `--participant P7`で出力ディレクトリ名を生成（P7_1, P7_2, ...）
+- `qr_sync.mp4`も出力ディレクトリのルートにコピー
+
+**前提条件**：全GoProが各セッションで同時に録画開始/停止しており、ファイル番号の対応関係が正しいこと。
+
 ```bash
 # プレビュー（dry-run）
 python workflow/organize_gopro_videos.py \
@@ -123,11 +132,53 @@ organized/
 
 ---
 
+## Pipeline 全体概要
+
+### 依存関係フロー図
+
+```
+データ準備
+├── Mocap生データ配置 (AVI + CSV + .mcal)
+└── GoPro生データ整理 (カメラごと → セッションごと)
+    ↓
+Phase 1: Mocapデータ処理 (自動)
+├── 出力: video.mp4, skeleton_h36m.npy, body_markers.npy, blade_editor_*.html
+└── ⚠️ 手動: HTMLエディタを開き、ブレードエッジをアノテーション → blade_polygon_order_*.json
+    ↓
+Phase 2: ブレードエッジ抽出 + cam19リファインメント
+├── 出力: *_edges.npy (ブレード3D軌跡)
+└── ⚠️ 手動: refine_extrinsics.pyでcam19を最適化 → cam19_refined.yaml
+    ↓
+Phase 3: GoPro完全パイプライン (自動)
+├── 3.1 GoPro QR同期
+├── 3.2 PrimeColor同期
+├── 3.3 17カメラ共同キャリブレーション (calibration sessionのみ)
+├── 3.4 カメラごとYAML生成
+└── 3.5 GT分配 → cam*/gt/skeleton.npy, blade_edges.npy, valid_mask.npy
+    ↓
+検証 (オプション・手動)
+├── verify_gt_offset.py → 時間整列チェック
+├── verify_cam19_gt.py → 投影品質の可視化
+└── refine_extrinsics.py → 個別GoProの最適化 (必要に応じて)
+    ↓
+完了: cam*/gt/ がトレーニングに利用可能
+```
+
+---
+
 ## Pipeline 3つのフェーズ
 
 ### フェーズ1：Mocapデータ処理
 
 **目的**：AVIビデオ結合 + CSV→GT変換 + ブレードアノテーションツール生成
+
+#### 入力
+
+| ファイル | 出典 | 説明 |
+|---------|------|------|
+| `P7_X/*.avi` | Motive録画 | PrimeColor 120fpsビデオ（複数セグメントの場合あり） |
+| `P7_X/*.csv` | Motiveエクスポート | スケルトン + マーカー3D座標 |
+| `*.mcal` | OptiTrackキャリブレーション | cam19初期内部・外部パラメータを含む |
 
 #### コマンド
 
@@ -141,16 +192,23 @@ python workflow/process_mocap_session.py \
 
 #### 出力（セッションごと）
 
+| ファイル | Shape / 形式 | 説明 |
+|---------|-------------|------|
+| `video.mp4` | 120fps, 1920x1080 | PrimeColorビデオ（複数セグメント結合済み、透かし除去済み） |
+| `cam19_initial.yaml` | YAML (K, D, R, t) | .mcalから抽出した初期内部・外部パラメータ |
+| `skeleton_h36m.npy` | `(N, 17, 3)` | H36M形式スケルトン、17関節、ワールド座標系 |
+| `body_markers.npy` | `(N, 27, 3)` | Plug-in Gaitマーカー（cam19リファインメント用） |
+| `leg_markers.npy` | `(N, 8, 3)` | 切断側マーカー L1-L4, R1-R4 |
+| `blade_editor_*.html` | HTML | インタラクティブ3Dブレードアノテーションツール |
+
 ```
 P7_output/P7_1/
-├── video.mp4                      # 120fps PrimeColorビデオ（透かし除去済み）
-├── cam19_initial.yaml             # .mcalから抽出した初期外部パラメータ
-├── skeleton_h36m.npy              # (N, 17, 3) H36M形式スケルトン
-├── body_markers.npy               # (N, 27, 3) Plug-in Gaitマーカー
-├── body_marker_names.json
-├── leg_markers.npy                # (N, 8, 3) L1-L4, R1-R4
-├── leg_marker_names.json
-├── blade_editor_Rblade.html       # インタラクティブブレードアノテーションツール
+├── video.mp4
+├── cam19_initial.yaml
+├── skeleton_h36m.npy
+├── body_markers.npy, body_marker_names.json
+├── leg_markers.npy, leg_marker_names.json
+├── blade_editor_Rblade.html
 ├── blade_editor_lblade2.html
 └── ...
 ```
@@ -189,6 +247,16 @@ P7_output/P7_1/
 
 **目的**：CSVからブレード3D軌跡を抽出 + cam19外部パラメータ最適化
 
+#### 入力（前段依存）
+
+| ファイル | 出典 | 説明 |
+|---------|------|------|
+| `P7_X/*.csv` | Mocap生データ | ブレードrigid bodyのマーカー座標を含む |
+| `blade_polygon_order_*.json` | **Phase 1 手動アノテーション** | ブレード両エッジのマーカー順序を定義 |
+| `body_markers.npy` | Phase 1出力 | cam19リファインメントで使用するマーカー対応 |
+| `video.mp4` | Phase 1出力 | cam19リファインメント用ビデオ |
+| `cam19_initial.yaml` | Phase 1出力 | cam19初期パラメータ（リファインメントの起点） |
+
 #### コマンド
 
 ```bash
@@ -202,19 +270,16 @@ python workflow/process_blade_session.py \
 
 #### 出力（セッションごと）
 
-```
-P7_output/P7_1/
-├── Rblade_edge1.npy               # (N, M, 3) Edge 1生軌跡
-├── Rblade_edge2.npy               # (N, M, 3) Edge 2生軌跡
-├── Rblade_edges.npy               # (N, K, 2, 3) リサンプル整列済みエッジ
-├── Rblade_marker_names.json
-├── lblade2_edge1.npy
-├── lblade2_edge2.npy
-├── lblade2_edges.npy
-└── lblade2_marker_names.json
-```
+| ファイル | Shape | 説明 |
+|---------|-------|------|
+| `Rblade_edge1.npy` | `(N, M, 3)` | Edge 1元マーカー軌跡 |
+| `Rblade_edge2.npy` | `(N, M, 3)` | Edge 2元マーカー軌跡 |
+| `Rblade_edges.npy` | `(N, K, 2, 3)` | 弧長リサンプリング後の両エッジペア |
+| `Rblade_marker_names.json` | JSON | rigid body名とマーカーグループの記録 |
 
-**重要**：`*_edges.npy`はGT分配用の最終データ（均等間隔ポイントペアにリサンプル済み）
+> lblade2が存在する場合、同様に`lblade2_*`ファイルも生成されます。
+
+**重要**：`*_edges.npy`のshapeにおける`K` = 両エッジのマーカー数の最大値（弧長リサンプリング後等間隔）、`2` = 両エッジ、`3` = xyzワールド座標
 
 #### 🔧 インタラクティブステップ：cam19外部パラメータ最適化
 
@@ -223,13 +288,12 @@ P7_output/P7_1/
 **セッション選択**：**最大モーション範囲**のセッション（例：P7_4）を選択、一度最適化して全セッションに適用
 
 ```bash
+# cam19 ダイレクトモード（ファイルがsynced外のP7_outputにあるため明示パス使用）
 python post_calibration/refine_extrinsics.py \
     --markers /Volumes/KINGSTON/P7_output/P7_4/body_markers.npy \
-    --names /Volumes/KINGSTON/P7_output/P7_4/body_marker_names.json \
     --video /Volumes/KINGSTON/P7_output/P7_4/video.mp4 \
     --camera /Volumes/KINGSTON/P7_output/P7_4/cam19_initial.yaml \
-    --output /Volumes/KINGSTON/P7_output/P7_4/cam19_refined.yaml \
-    --no-sync
+    --output /Volumes/KINGSTON/P7_output/P7_4/cam19_refined.yaml
 ```
 
 **操作手順**：
@@ -266,7 +330,17 @@ python post_calibration/refine_extrinsics.py \
 
 **目的**：GoPro同期 + PrimeColor同期 + 17カメラ共同キャリブレーション + YAML生成 + GT分配
 
-**全P7セッションをワンコマンド実行**：
+#### 入力（前段依存）
+
+| ファイル | 出典 | 説明 |
+|---------|------|------|
+| `organized/P7_X/cam*/*.MP4` | データ準備 step 3 | セッションごとに整理済みのGoProビデオ |
+| `organized/qr_sync.mp4` | データ準備 step 3 | QRアンカービデオ |
+| `cam19_refined.yaml` | **Phase 2 手動最適化** | パーティシパントレベルのcam19最適化パラメータ |
+| `skeleton_h36m.npy` | Phase 1出力 | GT分配用 |
+| `*_edges.npy` | Phase 2出力 | GT分配用（ブレード軌跡） |
+
+#### コマンド
 
 ```bash
 python workflow/process_p7_complete.py \
@@ -281,9 +355,18 @@ python workflow/process_p7_complete.py \
 ```
 
 **注意**：
-- ✅ `--cam19_refined`パラメータはオプション（`P7_output/*/cam19_refined.yaml`を自動検索）
-- ✅ `--calibration_session`：ChArucoボードが**安定してクリア**なセッションをキャリブレーション用に選択
-- ✅ `--start_time` / `--duration`：キャリブレーション用時間範囲（秒）、ボードが安定したセグメントを選択
+- `--cam19_refined`パラメータはオプション（`P7_output/*/cam19_refined.yaml`を自動検索）
+
+#### `--calibration_session`と`--start_time` / `--duration`の決め方
+
+キャリブレーションにはChArucoボードが画面内で**静止かつ鮮明**である必要があります。決定方法：
+
+1. **calibration sessionの選択**：各セッションのGoProビデオ（同期前の元ビデオで可）を開き、ChArucoボードが長時間静止しているセッションを見つける。通常は録画開始時や終了時にボードを設置している段階
+2. **start_timeの決定**：ボードが静止し始めるおおよその秒数を特定。ビデオプレイヤーのシークバーで確認可能
+3. **durationの決定**：ボード静止の持続時間（秒）。最低60秒以上推奨、長いほど良い（安定フレーム数が増加 → RMS低下）
+4. **検証**：パイプラインは`original_stable/`に検出された安定フレームを保存。安定フレームが100未満の場合、時間範囲の拡大やセッション変更を検討
+
+**例**：P7_1のGoProビデオでChArucoボードが第707秒から第971秒まで静止している場合、`--start_time 707 --duration 264`
 
 #### パイプライン自動実行ステップ
 
@@ -314,12 +397,12 @@ python workflow/process_p7_complete.py \
 - 出力場所：`individual_cam_params/`
 
 **フェーズ3.5：GT分配**（~1分/セッション）
-- シンボリックリンク作成：
-  - `cam19/skeleton_h36m.npy` → `/Volumes/KINGSTON/P7_output/P7_X/skeleton_h36m.npy`
-  - `cam19/Rblade_edges.npy` → `/Volumes/KINGSTON/P7_output/P7_X/Rblade_edges.npy`
-  - `cam19/lblade2_edges.npy` → `/Volumes/KINGSTON/P7_output/P7_X/lblade2_edges.npy`
-  - `cam19/aligned_edges.npy` → プライマリブレード（Rblade優先）
-- `distribute_gt.py`呼び出し、120fps mocapデータを各GoPro 60fpsタイムラインにリサンプル
+- cam19/ディレクトリにシンボリックリンクを作成：
+  - `skeleton_h36m.npy` → mocap出力のスケルトンデータ
+  - `Rblade_edges.npy`, `lblade2_edges.npy` → 各ブレードのエッジデータ
+  - `aligned_edges.npy` → **プライマリブレードへのシンボリックリンク**（優先順位: Rblade > lblade2 > 最初に見つかったブレード）
+- `aligned_edges.npy`について：これは便宜上のシンボリックリンクで、`distribute_gt.py`がこれを読み取って各カメラの`blade_edges.npy`を生成します。両側切断（Rbladeとlblade2が存在）の場合、**プライマリブレードのみが汎用の`blade_edges.npy`として分配されます**。各ブレードの元ファイルはcam19/内の名前付きシンボリックリンクから個別にアクセス可能です
+- `distribute_gt.py`を呼び出し、120fps mocapデータを各GoPro 60fpsタイムラインにリサンプル
 - 出力：`cam*/gt/skeleton.npy`、`cam*/gt/blade_edges.npy`、`cam*/gt/valid_mask.npy`
 
 ---
@@ -378,13 +461,11 @@ python post_calibration/verify_cam19_gt.py \
 **目的**：特定のGoProの投影品質が悪い場合、個別に外部パラメータを最適化
 
 ```bash
+# 便利モード：session + cam + 2つのベースパスのみ
 python post_calibration/refine_extrinsics.py \
-    --markers /Volumes/KINGSTON/P7_output/P7_1/body_markers.npy \
-    --names /Volumes/KINGSTON/P7_output/P7_1/body_marker_names.json \
-    --video /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/cam3/GX010281.MP4 \
-    --camera /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/individual_cam_params/cam3.yaml \
-    --output /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/individual_cam_params/cam3_refined.yaml \
-    --sync /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/cam19/sync_mapping.json
+    --session P7_1 --cam cam3 \
+    --markers-base /Volumes/KINGSTON/P7_output \
+    --synced-base /Volumes/FastACIS/csl_11_5/synced
 ```
 
 **操作手順はcam19リファインメントと同じ**

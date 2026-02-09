@@ -8,10 +8,11 @@ Complete multi-camera calibration and GT distribution for one participant, from 
 
 1. [Prerequisites](#prerequisites)
 2. [Data Preparation](#data-preparation)
-3. [Three Pipeline Phases](#three-pipeline-phases)
-4. [Verification and Optimization Tools](#verification-and-optimization-tools)
-5. [Output Directory Structure](#output-directory-structure)
-6. [Troubleshooting](#troubleshooting)
+3. [Pipeline Overview](#pipeline-overview)
+4. [Three Pipeline Phases](#three-pipeline-phases)
+5. [Verification and Optimization Tools](#verification-and-optimization-tools)
+6. [Output Directory Structure](#output-directory-structure)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -95,6 +96,15 @@ P7_gopro/
 
 **Why needed**: Raw data is per-camera structure, pipeline requires per-session structure.
 
+**How it works**:
+- Scans all MP4 files under each `cam*/` directory
+- Sorts by filename number (GoPro auto-incrementing numbers = recording time order)
+- Assumes the **Nth video from each camera = Nth session**
+- `--participant P7` sets the output directory name prefix (P7_1, P7_2, ...)
+- Also copies `qr_sync.mp4` to the output directory root
+
+**Prerequisite**: All GoPros start/stop recording simultaneously for each session, ensuring filename number correspondence is correct.
+
 ```bash
 # Preview (dry-run)
 python workflow/organize_gopro_videos.py \
@@ -123,11 +133,53 @@ organized/
 
 ---
 
+## Pipeline Overview
+
+### Dependency Flow Diagram
+
+```
+Data Preparation
+├── Place Mocap raw data (AVI + CSV + .mcal)
+└── Organize GoPro raw data (per-camera → per-session)
+    ↓
+Phase 1: Mocap Data Processing (automatic)
+├── Output: video.mp4, skeleton_h36m.npy, body_markers.npy, blade_editor_*.html
+└── ⚠️ Manual: Open HTML editor, annotate blade edges → blade_polygon_order_*.json
+    ↓
+Phase 2: Blade Edge Extraction + cam19 Refinement
+├── Output: *_edges.npy (blade 3D trajectories)
+└── ⚠️ Manual: Run refine_extrinsics.py to optimize cam19 → cam19_refined.yaml
+    ↓
+Phase 3: GoPro Complete Pipeline (automatic)
+├── 3.1 GoPro QR sync
+├── 3.2 PrimeColor sync
+├── 3.3 17-camera joint calibration (calibration session only)
+├── 3.4 Generate per-camera YAMLs
+└── 3.5 GT distribution → cam*/gt/skeleton.npy, blade_edges.npy, valid_mask.npy
+    ↓
+Verification (optional, manual)
+├── verify_gt_offset.py → Check temporal alignment
+├── verify_cam19_gt.py → Visualize projection quality
+└── refine_extrinsics.py → Individually refine a GoPro (if needed)
+    ↓
+Done: cam*/gt/ ready for training
+```
+
+---
+
 ## Three Pipeline Phases
 
 ### Phase 1: Mocap Data Processing
 
 **Purpose**: Merge AVI videos + CSV to GT + Generate blade annotation tools
+
+#### Input
+
+| File | Source | Description |
+|------|--------|-------------|
+| `P7_X/*.avi` | Motive recording | PrimeColor 120fps video (may have multiple segments) |
+| `P7_X/*.csv` | Motive export | Skeleton + marker 3D coordinates |
+| `*.mcal` | OptiTrack calibration | Contains cam19 initial intrinsics and extrinsics |
 
 #### Command
 
@@ -141,16 +193,23 @@ python workflow/process_mocap_session.py \
 
 #### Output (per session)
 
+| File | Shape / Format | Description |
+|------|---------------|-------------|
+| `video.mp4` | 120fps, 1920x1080 | PrimeColor video (multi-segment merged, watermark removed) |
+| `cam19_initial.yaml` | YAML (K, D, R, t) | Initial intrinsics and extrinsics extracted from .mcal |
+| `skeleton_h36m.npy` | `(N, 17, 3)` | H36M format skeleton, 17 joints, world coordinates |
+| `body_markers.npy` | `(N, 27, 3)` | Plug-in Gait markers (used for cam19 refinement) |
+| `leg_markers.npy` | `(N, 8, 3)` | Amputee-side markers L1-L4, R1-R4 |
+| `blade_editor_*.html` | HTML | Interactive 3D blade annotation tool |
+
 ```
 P7_output/P7_1/
-├── video.mp4                      # 120fps PrimeColor video (watermark removed)
-├── cam19_initial.yaml             # Initial extrinsics extracted from .mcal
-├── skeleton_h36m.npy              # (N, 17, 3) H36M format skeleton
-├── body_markers.npy               # (N, 27, 3) Plug-in Gait markers
-├── body_marker_names.json
-├── leg_markers.npy                # (N, 8, 3) L1-L4, R1-R4
-├── leg_marker_names.json
-├── blade_editor_Rblade.html       # Interactive blade annotation tool
+├── video.mp4
+├── cam19_initial.yaml
+├── skeleton_h36m.npy
+├── body_markers.npy, body_marker_names.json
+├── leg_markers.npy, leg_marker_names.json
+├── blade_editor_Rblade.html
 ├── blade_editor_lblade2.html
 └── ...
 ```
@@ -189,6 +248,16 @@ P7_output/P7_1/
 
 **Purpose**: Extract blade 3D trajectories from CSV + Optimize cam19 extrinsics
 
+#### Input (Dependencies)
+
+| File | Source | Description |
+|------|--------|-------------|
+| `P7_X/*.csv` | Mocap raw data | Contains blade rigid body marker coordinates |
+| `blade_polygon_order_*.json` | **Phase 1 manual annotation** | Defines marker order for blade two edges |
+| `body_markers.npy` | Phase 1 output | Marker correspondences for cam19 refinement |
+| `video.mp4` | Phase 1 output | Video for cam19 refinement |
+| `cam19_initial.yaml` | Phase 1 output | cam19 initial parameters (refinement starting point) |
+
 #### Command
 
 ```bash
@@ -202,19 +271,16 @@ python workflow/process_blade_session.py \
 
 #### Output (per session)
 
-```
-P7_output/P7_1/
-├── Rblade_edge1.npy               # (N, M, 3) Edge 1 raw trajectory
-├── Rblade_edge2.npy               # (N, M, 3) Edge 2 raw trajectory
-├── Rblade_edges.npy               # (N, K, 2, 3) Resampled aligned edges
-├── Rblade_marker_names.json
-├── lblade2_edge1.npy
-├── lblade2_edge2.npy
-├── lblade2_edges.npy
-└── lblade2_marker_names.json
-```
+| File | Shape | Description |
+|------|-------|-------------|
+| `Rblade_edge1.npy` | `(N, M, 3)` | Edge 1 raw marker trajectory |
+| `Rblade_edge2.npy` | `(N, M, 3)` | Edge 2 raw marker trajectory |
+| `Rblade_edges.npy` | `(N, K, 2, 3)` | Arc-length resampled edge pairs |
+| `Rblade_marker_names.json` | JSON | Rigid body name and marker grouping |
 
-**Key**: `*_edges.npy` is final data for GT distribution (resampled to uniform point pairs)
+> Same pattern for `lblade2_*` files, if a second blade exists.
+
+**Key**: In the `*_edges.npy` shape, `K` = maximum marker count across the two edges (uniformly spaced after arc-length resampling), `2` = the two edges, `3` = xyz world coordinates
 
 #### 🔧 Interactive Step: cam19 Extrinsics Optimization
 
@@ -223,13 +289,12 @@ P7_output/P7_1/
 **Session Selection**: Choose session with **largest motion range** (e.g., P7_4), optimize once and apply to all sessions
 
 ```bash
+# cam19 direct mode (explicit paths, since files are in P7_output not synced dir)
 python post_calibration/refine_extrinsics.py \
     --markers /Volumes/KINGSTON/P7_output/P7_4/body_markers.npy \
-    --names /Volumes/KINGSTON/P7_output/P7_4/body_marker_names.json \
     --video /Volumes/KINGSTON/P7_output/P7_4/video.mp4 \
     --camera /Volumes/KINGSTON/P7_output/P7_4/cam19_initial.yaml \
-    --output /Volumes/KINGSTON/P7_output/P7_4/cam19_refined.yaml \
-    --no-sync
+    --output /Volumes/KINGSTON/P7_output/P7_4/cam19_refined.yaml
 ```
 
 **Operation Steps**:
@@ -266,7 +331,17 @@ python post_calibration/refine_extrinsics.py \
 
 **Purpose**: GoPro sync + PrimeColor sync + 17-camera joint calibration + YAML generation + GT distribution
 
-**One-command execution for all P7 sessions**:
+#### Input (Dependencies)
+
+| File | Source | Description |
+|------|--------|-------------|
+| `organized/P7_X/cam*/*.MP4` | Data Preparation step 3 | Per-session organized GoPro videos |
+| `organized/qr_sync.mp4` | Data Preparation step 3 | QR anchor video |
+| `cam19_refined.yaml` | **Phase 2 manual optimization** | Participant-level cam19 optimized parameters |
+| `skeleton_h36m.npy` | Phase 1 output | For GT distribution |
+| `*_edges.npy` | Phase 2 output | For GT distribution (blade trajectories) |
+
+#### Command
 
 ```bash
 python workflow/process_p7_complete.py \
@@ -280,10 +355,19 @@ python workflow/process_p7_complete.py \
     --sessions P7_1 P7_2 P7_3 P7_4 P7_5
 ```
 
-**Notes**:
-- ✅ `--cam19_refined` parameter is optional (auto-searches `P7_output/*/cam19_refined.yaml`)
-- ✅ `--calibration_session`: Choose session where ChArUco board is **stable and clear** for calibration
-- ✅ `--start_time` / `--duration`: Time range for calibration (seconds), select stable board segment
+**Note**:
+- `--cam19_refined` parameter is optional (auto-searches `P7_output/*/cam19_refined.yaml`)
+
+#### How to Determine `--calibration_session` and `--start_time` / `--duration`
+
+Calibration requires the ChArUco board to be **stable and clearly visible** in the frame. To determine these values:
+
+1. **Choose calibration session**: Open any GoPro video from each session (raw pre-sync video is fine) and find the session where the ChArUco board appears and remains stationary for a long period. This is typically when the board is placed at the start or end of recording
+2. **Determine start_time**: Find the approximate second when the board starts being stationary. Use a video player to scrub the timeline
+3. **Determine duration**: The length of time (in seconds) the board stays still. At least 60 seconds is recommended; longer is better (more stable frames = lower RMS)
+4. **Verify**: The pipeline saves detected stable frames in `original_stable/`. If fewer than 100 stable frames are found, consider expanding the time range or switching sessions
+
+**Example**: If the ChArUco board is stationary between seconds 707 and 971 in P7_1's GoPro video, then use `--start_time 707 --duration 264`
 
 #### Pipeline Automatic Execution Steps
 
@@ -314,11 +398,11 @@ python workflow/process_p7_complete.py \
 - Output location: `individual_cam_params/`
 
 **Phase 3.5: GT Distribution** (~1 min/session)
-- Create symlinks:
-  - `cam19/skeleton_h36m.npy` → `/Volumes/KINGSTON/P7_output/P7_X/skeleton_h36m.npy`
-  - `cam19/Rblade_edges.npy` → `/Volumes/KINGSTON/P7_output/P7_X/Rblade_edges.npy`
-  - `cam19/lblade2_edges.npy` → `/Volumes/KINGSTON/P7_output/P7_X/lblade2_edges.npy`
-  - `cam19/aligned_edges.npy` → Primary blade (Rblade priority)
+- Create symlinks to the cam19/ directory:
+  - `skeleton_h36m.npy` → mocap output skeleton data
+  - `Rblade_edges.npy`, `lblade2_edges.npy` → per-blade edge data
+  - `aligned_edges.npy` → **primary blade symlink** (priority: Rblade > lblade2 > first blade found)
+- `aligned_edges.npy` explanation: This is a convenience symlink that `distribute_gt.py` reads to produce each camera's `blade_edges.npy`. For bilateral amputees (with both Rblade and lblade2), **only the primary blade is distributed as the generic `blade_edges.npy`**. Each blade's original file is still accessible individually through the named symlinks in cam19/
 - Call `distribute_gt.py` to resample 120fps mocap data to each GoPro 60fps timeline
 - Output: `cam*/gt/skeleton.npy`, `cam*/gt/blade_edges.npy`, `cam*/gt/valid_mask.npy`
 
@@ -378,13 +462,11 @@ python post_calibration/verify_cam19_gt.py \
 **Purpose**: If a specific GoPro has poor projection quality, optimize its extrinsics individually
 
 ```bash
+# Convenience mode: just session + cam + two base paths
 python post_calibration/refine_extrinsics.py \
-    --markers /Volumes/KINGSTON/P7_output/P7_1/body_markers.npy \
-    --names /Volumes/KINGSTON/P7_output/P7_1/body_marker_names.json \
-    --video /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/cam3/GX010281.MP4 \
-    --camera /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/individual_cam_params/cam3.yaml \
-    --output /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/individual_cam_params/cam3_refined.yaml \
-    --sync /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/cam19/sync_mapping.json
+    --session P7_1 --cam cam3 \
+    --markers-base /Volumes/KINGSTON/P7_output \
+    --synced-base /Volumes/FastACIS/csl_11_5/synced
 ```
 
 **Operation steps same as cam19 refinement**

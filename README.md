@@ -114,13 +114,18 @@ python workflow/process_blade_session.py \
     --batch --share_json P7_1
 
 # Refine PrimeColor camera extrinsics (interactive)
+# cam19 direct mode (explicit paths for P7_output)
 python post_calibration/refine_extrinsics.py \
     --markers /path/to/P7_output/P7_4/body_markers.npy \
-    --names /path/to/P7_output/P7_4/body_marker_names.json \
     --video /path/to/P7_output/P7_4/video.mp4 \
     --camera /path/to/P7_output/P7_4/cam19_initial.yaml \
-    --output /path/to/P7_output/P7_4/cam19_refined.yaml \
-    --no-sync
+    --output /path/to/P7_output/P7_4/cam19_refined.yaml
+
+# Refine individual GoPro (convenience mode)
+python post_calibration/refine_extrinsics.py \
+    --session P7_1 --cam cam3 \
+    --markers-base /path/to/P7_output \
+    --synced-base /path/to/synced
 ```
 
 #### Step 3: Complete GoPro Pipeline (One Command!)

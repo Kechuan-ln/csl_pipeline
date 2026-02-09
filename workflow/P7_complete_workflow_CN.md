@@ -8,10 +8,11 @@
 
 1. [前提条件](#前提条件)
 2. [数据准备](#数据准备)
-3. [Pipeline 三大阶段](#pipeline-三大阶段)
-4. [验证和优化工具](#验证和优化工具)
-5. [输出目录结构](#输出目录结构)
-6. [故障排除](#故障排除)
+3. [Pipeline 总览](#pipeline-总览)
+4. [Pipeline 三大阶段](#pipeline-三大阶段)
+5. [验证和优化工具](#验证和优化工具)
+6. [输出目录结构](#输出目录结构)
+7. [故障排除](#故障排除)
 
 ---
 
@@ -95,6 +96,15 @@ P7_gopro/
 
 **为什么需要**：原始数据是 per-camera 结构，pipeline 需要 per-session 结构。
 
+**工作原理**：
+- 扫描每个 `cam*/` 目录下的 MP4 文件
+- 按文件名编号排序（GoPro 自动递增编号 = 录制时间顺序）
+- 假设每个相机的**第 N 个视频 = 第 N 个 session**
+- `--participant P7` 用于生成输出目录名（P7_1, P7_2, ...）
+- 同时复制 `qr_sync.mp4` 到输出目录根部
+
+**前提**：所有 GoPro 在每次 session 中同时开始/停止录制，确保文件编号对应关系正确。
+
 ```bash
 # 预览（dry-run）
 python workflow/organize_gopro_videos.py \
@@ -123,11 +133,53 @@ organized/
 
 ---
 
+## Pipeline 总览
+
+### 依赖流程图
+
+```
+数据准备
+├── 放置 Mocap 原始数据 (AVI + CSV + .mcal)
+└── 组织 GoPro 原始数据 (per-camera → per-session)
+    ↓
+Phase 1: Mocap 数据处理 (自动)
+├── 输出: video.mp4, skeleton_h36m.npy, body_markers.npy, blade_editor_*.html
+└── ⚠️ 手动: 打开 HTML 编辑器，标注 blade 边缘 → blade_polygon_order_*.json
+    ↓
+Phase 2: Blade 边缘提取 + cam19 Refinement
+├── 输出: *_edges.npy (blade 3D 轨迹)
+└── ⚠️ 手动: 运行 refine_extrinsics.py 优化 cam19 → cam19_refined.yaml
+    ↓
+Phase 3: GoPro 完整 Pipeline (自动)
+├── 3.1 GoPro QR 同步
+├── 3.2 PrimeColor 同步
+├── 3.3 17 相机联合校准 (仅 calibration session)
+├── 3.4 生成每相机 YAML
+└── 3.5 GT 分发 → cam*/gt/skeleton.npy, blade_edges.npy, valid_mask.npy
+    ↓
+验证 (可选手动)
+├── verify_gt_offset.py → 检查时间对齐
+├── verify_cam19_gt.py → 可视化投影质量
+└── refine_extrinsics.py → 单独优化某个 GoPro (如需)
+    ↓
+完成: cam*/gt/ 可用于训练
+```
+
+---
+
 ## Pipeline 三大阶段
 
 ### Phase 1: Mocap 数据处理
 
 **目的**: AVI 视频合并 + CSV 转 GT + 生成 blade 标注工具
+
+#### 输入
+
+| 文件 | 来源 | 说明 |
+|------|------|------|
+| `P7_X/*.avi` | Motive 录制 | PrimeColor 120fps 视频（可能多段） |
+| `P7_X/*.csv` | Motive 导出 | 骨架 + marker 3D 坐标 |
+| `*.mcal` | OptiTrack 校准 | 包含 cam19 初始内外参 |
 
 #### 命令
 
@@ -141,16 +193,23 @@ python workflow/process_mocap_session.py \
 
 #### 输出（每个 session）
 
+| 文件 | Shape / 格式 | 说明 |
+|------|-------------|------|
+| `video.mp4` | 120fps, 1920x1080 | PrimeColor 视频（多段已合并，已去水印） |
+| `cam19_initial.yaml` | YAML (K, D, R, t) | 从 .mcal 提取的初始内外参 |
+| `skeleton_h36m.npy` | `(N, 17, 3)` | H36M 格式骨架，17 关节，世界坐标系 |
+| `body_markers.npy` | `(N, 27, 3)` | Plug-in Gait markers（用于 cam19 refinement） |
+| `leg_markers.npy` | `(N, 8, 3)` | 截肢侧 markers L1-L4, R1-R4 |
+| `blade_editor_*.html` | HTML | 交互式 3D blade 标注工具 |
+
 ```
 P7_output/P7_1/
-├── video.mp4                      # 120fps PrimeColor 视频（已去水印）
-├── cam19_initial.yaml             # 从 .mcal 提取的初始外参
-├── skeleton_h36m.npy              # (N, 17, 3) H36M 格式骨架
-├── body_markers.npy               # (N, 27, 3) Plug-in Gait markers
-├── body_marker_names.json
-├── leg_markers.npy                # (N, 8, 3) L1-L4, R1-R4
-├── leg_marker_names.json
-├── blade_editor_Rblade.html       # 交互式 blade 标注工具
+├── video.mp4
+├── cam19_initial.yaml
+├── skeleton_h36m.npy
+├── body_markers.npy, body_marker_names.json
+├── leg_markers.npy, leg_marker_names.json
+├── blade_editor_Rblade.html
 ├── blade_editor_lblade2.html
 └── ...
 ```
@@ -189,6 +248,16 @@ P7_output/P7_1/
 
 **目的**: 从 CSV 提取 blade 3D 轨迹 + 优化 cam19 外参
 
+#### 输入（前置依赖）
+
+| 文件 | 来源 | 说明 |
+|------|------|------|
+| `P7_X/*.csv` | Mocap 原始数据 | 包含 blade rigid body 的 marker 坐标 |
+| `blade_polygon_order_*.json` | **Phase 1 手动标注** | 定义 blade 两条边的 marker 顺序 |
+| `body_markers.npy` | Phase 1 输出 | 用于 cam19 refinement 的 marker 对应 |
+| `video.mp4` | Phase 1 输出 | 用于 cam19 refinement 的视频 |
+| `cam19_initial.yaml` | Phase 1 输出 | cam19 初始参数（refinement 起点） |
+
 #### 命令
 
 ```bash
@@ -202,19 +271,16 @@ python workflow/process_blade_session.py \
 
 #### 输出（每个 session）
 
-```
-P7_output/P7_1/
-├── Rblade_edge1.npy               # (N, M, 3) Edge 1 原始轨迹
-├── Rblade_edge2.npy               # (N, M, 3) Edge 2 原始轨迹
-├── Rblade_edges.npy               # (N, K, 2, 3) 重采样对齐后的边缘
-├── Rblade_marker_names.json
-├── lblade2_edge1.npy
-├── lblade2_edge2.npy
-├── lblade2_edges.npy
-└── lblade2_marker_names.json
-```
+| 文件 | Shape | 说明 |
+|------|-------|------|
+| `Rblade_edge1.npy` | `(N, M, 3)` | Edge 1 原始 marker 轨迹 |
+| `Rblade_edge2.npy` | `(N, M, 3)` | Edge 2 原始 marker 轨迹 |
+| `Rblade_edges.npy` | `(N, K, 2, 3)` | 弧长重采样后的两条边缘对 |
+| `Rblade_marker_names.json` | JSON | 记录 rigid body 名和 marker 分组 |
 
-**关键**: `*_edges.npy` 是最终用于 GT 分发的数据（已重采样为等间距点对）
+> 同理 `lblade2_*` 文件，如果存在第二个 blade。
+
+**关键**: `*_edges.npy` shape 中 `K` = 两条边 marker 数的最大值（弧长重采样后等间距），`2` = 两条边，`3` = xyz 世界坐标
 
 #### 🔧 交互步骤：cam19 外参优化
 
@@ -223,13 +289,12 @@ P7_output/P7_1/
 **选择 session**: 选择 **motion range 最大** 的 session（例如 P7_4），优化一次后应用到所有 sessions
 
 ```bash
+# cam19 直接模式（使用显式路径，因为文件在 P7_output 而非 synced 目录）
 python post_calibration/refine_extrinsics.py \
     --markers /Volumes/KINGSTON/P7_output/P7_4/body_markers.npy \
-    --names /Volumes/KINGSTON/P7_output/P7_4/body_marker_names.json \
     --video /Volumes/KINGSTON/P7_output/P7_4/video.mp4 \
     --camera /Volumes/KINGSTON/P7_output/P7_4/cam19_initial.yaml \
-    --output /Volumes/KINGSTON/P7_output/P7_4/cam19_refined.yaml \
-    --no-sync
+    --output /Volumes/KINGSTON/P7_output/P7_4/cam19_refined.yaml
 ```
 
 **操作步骤**:
@@ -266,7 +331,17 @@ python post_calibration/refine_extrinsics.py \
 
 **目的**: GoPro 同步 + PrimeColor 同步 + 17 相机联合校准 + YAML 生成 + GT 分发
 
-**一键运行所有 P7 sessions**:
+#### 输入（前置依赖）
+
+| 文件 | 来源 | 说明 |
+|------|------|------|
+| `organized/P7_X/cam*/*.MP4` | 数据准备 step 3 | 按 session 组织好的 GoPro 视频 |
+| `organized/qr_sync.mp4` | 数据准备 step 3 | QR anchor 视频 |
+| `cam19_refined.yaml` | **Phase 2 手动优化** | participant 级别的 cam19 优化参数 |
+| `skeleton_h36m.npy` | Phase 1 输出 | 用于 GT 分发 |
+| `*_edges.npy` | Phase 2 输出 | 用于 GT 分发（blade 轨迹） |
+
+#### 命令
 
 ```bash
 python workflow/process_p7_complete.py \
@@ -281,9 +356,18 @@ python workflow/process_p7_complete.py \
 ```
 
 **注意**:
-- ✅ `--cam19_refined` 参数可选（自动搜索 `P7_output/*/cam19_refined.yaml`）
-- ✅ `--calibration_session`: 选择 ChArUco board **静止且清晰** 的 session 用于校准
-- ✅ `--start_time` / `--duration`: 校准用的时间范围（秒），需选择 board 稳定的片段
+- `--cam19_refined` 参数可选（自动搜索 `P7_output/*/cam19_refined.yaml`）
+
+#### 如何确定 `--calibration_session` 和 `--start_time` / `--duration`
+
+校准需要 ChArUco board 在画面中**静止且清晰**。确定方法：
+
+1. **选择 calibration session**: 打开每个 session 的某个 GoPro 视频（同步前的原始视频即可），找到 ChArUco board 出现且长时间静止的 session。通常是录制开始或结束时放置 board 的阶段
+2. **确定 start_time**: 找到 board 开始静止的大致秒数。可以用视频播放器拖动时间轴查看
+3. **确定 duration**: board 静止持续的时长（秒）。建议至少 60 秒，越长越好（更多稳定帧 → 更低 RMS）
+4. **验证**: Pipeline 会在 `original_stable/` 中保存检测到的稳定帧。如果稳定帧 < 100 个，考虑扩大时间范围或换 session
+
+**示例**: 如果 P7_1 的 GoPro 视频中，ChArUco board 在第 707 秒到 971 秒之间静止放置，则 `--start_time 707 --duration 264`
 
 #### Pipeline 自动执行的步骤
 
@@ -314,11 +398,11 @@ python workflow/process_p7_complete.py \
 - 输出位置：`individual_cam_params/`
 
 **Phase 3.5: GT 分发** (~1 分钟/session)
-- 创建 symlinks:
-  - `cam19/skeleton_h36m.npy` → `/Volumes/KINGSTON/P7_output/P7_X/skeleton_h36m.npy`
-  - `cam19/Rblade_edges.npy` → `/Volumes/KINGSTON/P7_output/P7_X/Rblade_edges.npy`
-  - `cam19/lblade2_edges.npy` → `/Volumes/KINGSTON/P7_output/P7_X/lblade2_edges.npy`
-  - `cam19/aligned_edges.npy` → 主 blade (Rblade 优先)
+- 创建 symlinks 到 cam19/ 目录:
+  - `skeleton_h36m.npy` → mocap 输出的骨架数据
+  - `Rblade_edges.npy`, `lblade2_edges.npy` → 每个 blade 的边缘数据
+  - `aligned_edges.npy` → **主 blade 的 symlink**（优先级: Rblade > lblade2 > 第一个找到的 blade）
+- `aligned_edges.npy` 说明：这是一个便捷 symlink，`distribute_gt.py` 读取它来生成各相机的 `blade_edges.npy`。对于双侧截肢（有 Rblade 和 lblade2），**只有主 blade 会被分发为通用的 `blade_edges.npy`**。各 blade 的原始文件仍可通过 cam19/ 中的命名 symlink 单独访问
 - 调用 `distribute_gt.py` 将 120fps mocap 数据重采样到每个 GoPro 60fps 时间轴
 - 输出：`cam*/gt/skeleton.npy`, `cam*/gt/blade_edges.npy`, `cam*/gt/valid_mask.npy`
 
@@ -378,13 +462,11 @@ python post_calibration/verify_cam19_gt.py \
 **目的**: 如果某个 GoPro 投影质量不佳，可单独优化其外参
 
 ```bash
+# 便捷模式：只需 session + cam + 两个 base 路径
 python post_calibration/refine_extrinsics.py \
-    --markers /Volumes/KINGSTON/P7_output/P7_1/body_markers.npy \
-    --names /Volumes/KINGSTON/P7_output/P7_1/body_marker_names.json \
-    --video /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/cam3/GX010281.MP4 \
-    --camera /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/individual_cam_params/cam3.yaml \
-    --output /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/individual_cam_params/cam3_refined.yaml \
-    --sync /Volumes/FastACIS/csl_11_5/synced/P7_1_sync/cameras_synced/cam19/sync_mapping.json
+    --session P7_1 --cam cam3 \
+    --markers-base /Volumes/KINGSTON/P7_output \
+    --synced-base /Volumes/FastACIS/csl_11_5/synced
 ```
 
 **操作步骤同 cam19 refinement**
