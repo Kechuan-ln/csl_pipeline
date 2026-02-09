@@ -141,7 +141,7 @@ def phase1_gopro_sync(organized_dir, output_dir, anchor_video, sessions):
     print_success("All GoPro sessions synchronized")
 
 
-def phase2_primecolor_sync(mocap_dir, output_dir, sessions, anchor_video):
+def phase2_primecolor_sync(organized_dir, mocap_dir, output_dir, sessions, anchor_video):
     """Phase 2: Synchronize all PrimeColor sessions."""
     print_phase(2, 5, "PrimeColor Synchronization")
 
@@ -164,7 +164,8 @@ def phase2_primecolor_sync(mocap_dir, output_dir, sessions, anchor_video):
 
         print(f"\n  Syncing {session}...")
 
-        # Find a GoPro video as reference (use cam1)
+        # Find a synced GoPro video for metadata (fps, duration).
+        # We don't scan it for QR codes - the pre-computed offset from Phase 1 is used instead.
         gopro_video = None
         for cam_dir in sorted(session_synced.glob("cam*")):
             if cam_dir.is_dir() and cam_dir.name != "cam19":
@@ -174,8 +175,33 @@ def phase2_primecolor_sync(mocap_dir, output_dir, sessions, anchor_video):
                     break
 
         if not gopro_video:
-            print_error(f"{session}: No GoPro video found, skipping")
+            print_error(f"{session}: No synced GoPro video found, skipping")
             continue
+
+        # Read Phase 1 meta_info.json to get pre-computed GoPro anchor offset.
+        # The synced video's effective anchor offset = anchor_offset - sync_offset
+        # because sync_offset seconds were trimmed from the beginning.
+        meta_file = session_synced / "meta_info.json"
+        gopro_anchor_offset = None
+
+        if meta_file.exists():
+            with open(meta_file) as f:
+                meta = json.load(f)
+
+            # Find cam1's entry (use same camera as gopro_video)
+            cam_name = gopro_video.parent.name
+            for key, cam_meta in meta.get("cameras", {}).items():
+                if key.startswith(cam_name + "/"):
+                    anchor_off = cam_meta.get("anchor_offset")
+                    sync_off = cam_meta.get("sync_offset", 0.0)
+                    if anchor_off is not None:
+                        gopro_anchor_offset = anchor_off - sync_off
+                        print(f"  Pre-computed GoPro anchor offset: {gopro_anchor_offset:.6f}s")
+                        print(f"    (anchor_offset={anchor_off:.6f} - sync_offset={sync_off:.6f})")
+                    break
+
+        if gopro_anchor_offset is None:
+            print_warning(f"{session}: Could not read anchor offset from meta_info.json, will scan QR codes")
 
         cmd = [
             "python", os.path.join(CSL_ROOT, "sync", "sync_primecolor_to_gopro_precise.py"),
@@ -183,8 +209,15 @@ def phase2_primecolor_sync(mocap_dir, output_dir, sessions, anchor_video):
             "--primecolor_video", str(primecolor_input),
             "--anchor_video", str(anchor_video),
             "--output_dir", str(session_synced / "cam19"),
-            "--skip_csv"  # Skip CSV sync for now
+            "--scan_duration", "240",
+            "--min_detections", "30",
+            "--frame_step", "10",
+            "--skip_csv",
+            "--gpu"
         ]
+
+        if gopro_anchor_offset is not None:
+            cmd.extend(["--gopro_anchor_offset", str(gopro_anchor_offset)])
 
         run_command(cmd, f"PrimeColor sync for {session}")
 
@@ -215,9 +248,11 @@ def phase3_calibration(calibration_session, output_dir, start_time, duration, fp
     print("\n  [3.1] Extracting frames...")
     output_frames = session_synced / "original"
 
-    existing_frames = list(output_frames.glob("cam*/frame_*.jpg"))
-    if len(existing_frames) > 100:
-        print_success(f"Frames already extracted ({len(existing_frames)} images)")
+    # Check that most cameras have extracted frames (not just total count)
+    cam_dirs_with_frames = [d for d in output_frames.glob("cam*") if d.is_dir() and len(list(d.glob("frame_*.jpg"))) > 10]
+    if len(cam_dirs_with_frames) >= 15:
+        total = sum(len(list(d.glob("frame_*.jpg"))) for d in cam_dirs_with_frames)
+        print_success(f"Frames already extracted ({total} images across {len(cam_dirs_with_frames)} cameras)")
     else:
         output_frames.mkdir(parents=True, exist_ok=True)
 
@@ -246,10 +281,10 @@ def phase3_calibration(calibration_session, output_dir, start_time, duration, fp
 
             cmd = [
                 "python", os.path.join(CSL_ROOT, "scripts", "convert_video_to_images.py"),
-                "--video", str(video_path),
-                "--output_dir", str(cam_output),
+                "--src_tag", str(session_synced),
+                "--cam_tags", cam_name,
                 "--fps", str(fps),
-                "--start_sec", str(start_time),
+                "--ss", str(start_time),
                 "--duration", str(duration),
                 "--format", "jpg"
             ]
@@ -271,13 +306,14 @@ def phase3_calibration(calibration_session, output_dir, start_time, duration, fp
 
         cmd = [
             "python", os.path.join(CSL_ROOT, "scripts", "find_stable_boards.py"),
-            "--input_dir", str(output_frames),
-            "--output_dir", str(output_stable),
-            "--board", board_config,
+            "--recording_tag", str(output_frames),
+            "--boards", board_config,
             "--movement_threshold", "5.0",
             "--min_detection_quality", "40",
             "--downsample_rate", "10",
-            "--max_frames", "500"
+            "--max_frames_per_camera", "500",
+            "--copy_stable_frames",
+            "--output_suffix", "_stable"
         ]
 
         run_command(cmd, "Stable frame detection")
@@ -296,9 +332,10 @@ def phase3_calibration(calibration_session, output_dir, start_time, duration, fp
     try:
         cmd = [
             "python", "-m", "multical.app.calibrate",
-            str(output_stable),
+            "--image_path", str(output_stable),
             "--boards", board_config,
-            "--intrinsic", intrinsic_file,
+            "--calibration", intrinsic_file,
+            "--camera_pattern", "{camera}",
             "--fix_intrinsic",
             "--limit_images", "1000"
         ]
@@ -551,7 +588,7 @@ def main():
     # Execute pipeline
     try:
         phase1_gopro_sync(organized_dir, output_dir, args.anchor_video, args.sessions)
-        phase2_primecolor_sync(mocap_dir, output_dir, args.sessions, args.anchor_video)
+        phase2_primecolor_sync(organized_dir, mocap_dir, output_dir, args.sessions, args.anchor_video)
         phase3_calibration(args.calibration_session, output_dir, args.start_time, args.duration, args.fps)
         phase4_generate_yamls(args.calibration_session, cam19_refined, output_dir, args.sessions)
         phase5_distribute_gt(mocap_dir, output_dir, args.sessions)

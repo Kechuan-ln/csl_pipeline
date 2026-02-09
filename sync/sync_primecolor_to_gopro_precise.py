@@ -501,6 +501,9 @@ def main():
                        help='QR 码前缀')
     parser.add_argument('--min_detections', type=int, default=30,
                        help='最少QR检测数量，达到后提前停止（默认30，0=不限制）')
+    parser.add_argument('--gopro_anchor_offset', type=float, default=None,
+                       help='预计算的 GoPro anchor 偏移（秒）。提供后跳过 GoPro QR 扫描，'
+                            '直接使用此值。可从 Phase 1 meta_info.json 计算: anchor_offset - sync_offset')
     parser.add_argument('--gpu', action='store_true',
                        help='使用 GPU 加速编码（macOS VideoToolbox）')
     parser.add_argument('--skip_csv', action='store_true',
@@ -522,29 +525,39 @@ def main():
         frame_step=5
     )
 
-    # 步骤 2: 扫描 GoPro
+    # 步骤 2: 获取 GoPro anchor 偏移
     print("\n" + "=" * 80)
-    print("步骤 2: 扫描 GoPro 视频")
+    print("步骤 2: 获取 GoPro anchor 偏移")
     print("=" * 80)
-    print(f"  GoPro 视频路径: {args.gopro_video}")
-    print(f"  文件存在: {os.path.exists(args.gopro_video)}")
 
-    gopro_detections = scan_video_qr_segment(
-        args.gopro_video,
-        start_time=0.0,
-        duration=args.scan_duration,
-        frame_step=args.frame_step,
-        prefix=args.prefix,
-        min_detections=args.min_detections,
-        early_stop=True
-    )
     gopro_info = get_video_info(args.gopro_video)
-    print(f"  检测到 {len(gopro_detections)} 个 QR 码")
+    print(f"  GoPro 视频路径: {args.gopro_video}")
     print(f"  视频信息: {gopro_info['fps']:.2f}fps, {gopro_info['duration']:.2f}s")
 
-    if not gopro_detections:
-        print(f"  ⚠️ 警告: GoPro 视频未检测到 QR 码！")
-        print(f"  提示: 检查视频是否包含 QR 码，或尝试增加 --scan_duration 和 --min_detections")
+    gopro_anchor_offset = None
+
+    if args.gopro_anchor_offset is not None:
+        # 使用预计算的 anchor 偏移（来自 Phase 1 meta_info.json）
+        gopro_anchor_offset = args.gopro_anchor_offset
+        print(f"  使用预计算偏移: {gopro_anchor_offset:.6f}s (跳过 QR 扫描)")
+        gopro_detections = []  # 不需要 detections，仅用于统计显示
+    else:
+        # 扫描 GoPro 视频的 QR 码
+        print(f"  扫描 QR 码...")
+        gopro_detections = scan_video_qr_segment(
+            args.gopro_video,
+            start_time=0.0,
+            duration=args.scan_duration,
+            frame_step=args.frame_step,
+            prefix=args.prefix,
+            min_detections=args.min_detections,
+            early_stop=True
+        )
+        print(f"  检测到 {len(gopro_detections)} 个 QR 码")
+
+        if not gopro_detections:
+            print(f"  ⚠️ 警告: GoPro 视频未检测到 QR 码！")
+            print(f"  提示: 检查视频是否包含 QR 码，或尝试增加 --scan_duration 和 --min_detections")
 
     # 步骤 3: 扫描 PrimeColor
     print("\n" + "=" * 80)
@@ -567,12 +580,34 @@ def main():
     print("\n" + "=" * 80)
     print("步骤 4: 计算时间偏移")
     print("=" * 80)
-    offset_seconds, gopro_offset, primecolor_offset, offset_std = calculate_time_offset(
-        gopro_detections,
-        primecolor_detections,
-        anchor_map,
-        anchor_fps
-    )
+
+    if gopro_anchor_offset is not None:
+        # 使用预计算的 GoPro anchor 偏移，只需从 PrimeColor 检测计算 primecolor_offset
+        if not primecolor_detections:
+            print(f"  ❌ 错误: PrimeColor 视频未检测到 QR 码")
+            return 1
+
+        primecolor_offsets = []
+        for video_time, qr_num in primecolor_detections:
+            anchor_time = get_anchor_time(qr_num, anchor_map, anchor_fps)
+            primecolor_offsets.append(video_time - anchor_time)
+
+        primecolor_offset = float(np.median(primecolor_offsets))
+        primecolor_std = float(np.std(primecolor_offsets))
+        gopro_offset = gopro_anchor_offset
+        offset_seconds = gopro_offset - primecolor_offset
+        offset_std = primecolor_std  # 只有 PrimeColor 侧的不确定性
+
+        print(f"  GoPro anchor 偏移 (预计算): {gopro_offset:.6f}s")
+        print(f"  PrimeColor anchor 偏移: {primecolor_offset:.6f}s (std: {primecolor_std:.4f}s)")
+        print(f"  相对偏移: {offset_seconds:.6f}s")
+    else:
+        offset_seconds, gopro_offset, primecolor_offset, offset_std = calculate_time_offset(
+            gopro_detections,
+            primecolor_detections,
+            anchor_map,
+            anchor_fps
+        )
 
     # 计算输出时长（使用 GoPro 完整时长，确保与 GoPro 对齐）
     # GoPro 时间范围: [0, gopro_duration]
