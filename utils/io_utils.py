@@ -29,9 +29,10 @@ def convert_video_to_images(path_video, dir_images, img_format=None, fps=None, d
     if img_format is None:
         img_format = f"frame_%04d.{image_format}"
 
-    command = ["ffmpeg",  "-i", path_video]
+    command = ["ffmpeg"]
     if ss is not None:
         command += ["-ss", str(ss)]
+    command += ["-i", path_video]
 
     if duration is not None:
         command += ["-t", str(duration)]
@@ -39,9 +40,9 @@ def convert_video_to_images(path_video, dir_images, img_format=None, fps=None, d
     if fps is not None:
         command += ["-vf", f"fps={fps}"]
     else:
-        command +=['-vsync', '0', '-q:v', '1', ]
+        command +=['-vsync', '0']
 
-    command += [f"{dir_images}/{img_format}"]
+    command += ["-q:v", "1", f"{dir_images}/{img_format}"]
     print("COMMAND:", ' '.join(command))
 
     subprocess.run(command)

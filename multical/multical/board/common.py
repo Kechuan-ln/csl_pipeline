@@ -7,10 +7,13 @@ from multical.transform import rtvec
 
 
 def aruco_config(attrs):
-  config = cv2.aruco.DetectorParameters_create()
+  if hasattr(cv2.aruco, 'DetectorParameters_create'):
+    config = cv2.aruco.DetectorParameters_create()
+  else:
+    config = cv2.aruco.DetectorParameters()
   for k, v in attrs.items():
     assert hasattr(config, k), f"aruco_config: no such detector parameter {k}"
-    setattr(config, k, v)  
+    setattr(config, k, v)
   return config
 
 empty_detection = struct(corners=np.zeros([0, 2]), ids=np.zeros(0, dtype=int))

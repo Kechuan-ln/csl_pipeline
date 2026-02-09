@@ -31,8 +31,12 @@ class CharucoBoard(Parameters, Board):
   def board(self):
     aruco_dict = create_dict(self.aruco_dict, self.aruco_offset)
     width, height = self.size
-    return cv2.aruco.CharucoBoard_create(width, height,
-      self.square_length, self.marker_length, aruco_dict)
+    if hasattr(cv2.aruco, 'CharucoBoard_create'):
+      return cv2.aruco.CharucoBoard_create(width, height,
+        self.square_length, self.marker_length, aruco_dict)
+    else:
+      return cv2.aruco.CharucoBoard((width, height),
+        self.square_length, self.marker_length, aruco_dict)
 
   @cached_property
   def aruco_config(self):

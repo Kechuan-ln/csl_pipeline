@@ -5,20 +5,31 @@ Interactive Extrinsic Refinement Tool
 Refine camera extrinsics by clicking on markers and their correct 2D positions.
 
 Usage:
-    # Direct mode (PrimeColor / cam19)
+    # Convenience mode (recommended for P4-P7):
     python refine_extrinsics.py \\
-        --markers cam19/markers.npy \\
-        --video cam19/PrimeColor.avi \\
-        --camera cam19.yaml --output refined_cam19.yaml
+        --session P4_5 --cam cam16 \\
+        --markers-base /Volumes/T7/csl \\
+        --synced-base /Volumes/FastACIS/csl_11_5/synced
 
-    # Sync mode (GoPro cameras)
+    # cam19 direct mode (auto-detected):
     python refine_extrinsics.py \\
-        --markers action2_data/bone_markers.npy \\
-        --video cam1/GX010409.MP4 \\
-        --camera individual_cam_params/cam1.yaml \\
-        --output refined_cam1.yaml \\
-        --sync action2_data/sync_mapping.json \\
-        --camera-offset 0
+        --session P4_5 --cam cam19 \\
+        --markers-base /Volumes/T7/csl \\
+        --synced-base /Volumes/FastACIS/csl_11_5/synced
+
+    # P7 with different markers base:
+    python refine_extrinsics.py \\
+        --session P7_1 --cam cam16 \\
+        --markers-base /Volumes/KINGSTON/P7_output \\
+        --synced-base /Volumes/FastACIS/csl_11_5/synced
+
+    # Explicit mode (all paths manually specified):
+    python refine_extrinsics.py \\
+        --markers /path/to/body_markers.npy \\
+        --video /path/to/video.MP4 \\
+        --camera /path/to/cam.yaml \\
+        --output /path/to/cam_refined.yaml \\
+        --sync /path/to/sync_mapping.json
 
 Controls:
     a/d     : Prev/Next frame
@@ -794,20 +805,103 @@ class ExtrinsicRefiner:
         cv2.destroyAllWindows()
 
 
+def resolve_paths(args):
+    """Derive file paths from --session/--cam/--markers-base/--synced-base convention.
+
+    Path convention:
+        markers:  {markers_base}/{session}/body_markers.npy
+        names:    {markers_base}/{session}/body_marker_names.json
+        video:    {synced_base}/{session}_sync/cameras_synced/{cam}/{session}.MP4
+                  (cam19: .../cam19/primecolor_synced.mp4)
+        camera:   {synced_base}/{session}_sync/cameras_synced/individual_cam_params/{cam}.yaml
+        output:   {synced_base}/{session}_sync/cameras_synced/individual_cam_params/{cam}_refined.yaml
+        sync:     {synced_base}/{session}_sync/cameras_synced/cam19/sync_mapping.json
+                  (cam19: not used, direct mode)
+
+    Explicit args (--markers, --video, etc.) override derived paths.
+    """
+    session_dir = Path(args.synced_base) / f'{args.session}_sync' / 'cameras_synced'
+
+    if not args.markers:
+        args.markers = str(Path(args.markers_base) / args.session / 'body_markers.npy')
+    if not args.names:
+        args.names = str(Path(args.markers_base) / args.session / 'body_marker_names.json')
+
+    is_cam19 = args.cam == 'cam19'
+
+    if not args.video:
+        if is_cam19:
+            args.video = str(session_dir / 'cam19' / 'primecolor_synced.mp4')
+        else:
+            args.video = str(session_dir / args.cam / f'{args.session}.MP4')
+
+    if not args.camera:
+        args.camera = str(session_dir / 'individual_cam_params' / f'{args.cam}.yaml')
+    if not args.output:
+        args.output = str(session_dir / 'individual_cam_params' / f'{args.cam}_refined.yaml')
+
+    # cam19 = direct mode (no sync); GoPro cameras need sync
+    if not args.sync and not is_cam19:
+        args.sync = str(session_dir / 'cam19' / 'sync_mapping.json')
+
+    return args
+
+
 def main():
     global args
-    parser = argparse.ArgumentParser(description='Interactive extrinsic refinement')
-    parser.add_argument('--markers', required=True, help='Path to markers.npy')
-    parser.add_argument('--names', help='Path to marker_names.json (optional)')
-    parser.add_argument('--video', required=True, help='Path to video')
-    parser.add_argument('--camera', required=True, help='Path to camera YAML')
-    parser.add_argument('--output', default='refined_camera.yaml', help='Output YAML path')
+    parser = argparse.ArgumentParser(
+        description='Interactive extrinsic refinement',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Convenience mode (recommended):
+  python refine_extrinsics.py --session P4_5 --cam cam16 \\
+      --markers-base /Volumes/T7/csl \\
+      --synced-base /Volumes/FastACIS/csl_11_5/synced
+
+Explicit mode (override any path):
+  python refine_extrinsics.py --session P4_5 --cam cam16 \\
+      --markers-base /Volumes/T7/csl \\
+      --synced-base /Volumes/FastACIS/csl_11_5/synced \\
+      --markers /custom/path/markers.npy
+""")
+
+    # Convenience args
+    conv = parser.add_argument_group('convenience mode')
+    conv.add_argument('--session', help='Session name (e.g. P4_5, P7_1)')
+    conv.add_argument('--cam', help='Camera name (e.g. cam16, cam19)')
+    conv.add_argument('--markers-base', help='Base dir containing {session}/body_markers.npy')
+    conv.add_argument('--synced-base', help='Base dir containing {session}_sync/cameras_synced/')
+
+    # Explicit path args (override derived paths)
+    paths = parser.add_argument_group('explicit paths (override convenience mode)')
+    paths.add_argument('--markers', help='Path to body_markers.npy')
+    paths.add_argument('--names', help='Path to body_marker_names.json')
+    paths.add_argument('--video', help='Path to video')
+    paths.add_argument('--camera', help='Path to camera YAML')
+    paths.add_argument('--output', help='Output YAML path')
+    paths.add_argument('--sync', help='Path to sync_mapping.json (enables sync mode)')
+
+    # Other args
     parser.add_argument('--start', type=int, default=0, help='Start frame')
-    parser.add_argument('--sync', help='Path to sync_mapping.json (enables time-based sync mode)')
     parser.add_argument('--camera-offset', type=float, default=0, help='Per-camera frame offset in GoPro frames')
     parser.add_argument('--mocap-start-frame', type=int, default=0, help='Start frame for trimmed mocap data')
 
     args = parser.parse_args()
+
+    # Resolve paths: convenience mode vs explicit mode
+    has_convenience = args.session and args.cam
+    has_explicit = args.markers and args.video and args.camera
+
+    if has_convenience:
+        if not args.markers_base or not args.synced_base:
+            parser.error('--markers-base and --synced-base are required with --session/--cam')
+        args = resolve_paths(args)
+    elif not has_explicit:
+        parser.error('Either use --session/--cam/--markers-base/--synced-base, '
+                     'or provide --markers/--video/--camera explicitly')
+
+    if not args.output:
+        args.output = 'refined_camera.yaml'
 
     # Load markers
     print(f"Loading markers: {args.markers}")
@@ -820,7 +914,7 @@ def main():
         candidates = [Path(args.names)]
     else:
         parent = Path(args.markers).parent
-        candidates = [parent / 'marker_names.json', parent / 'markers_meta.json']
+        candidates = [parent / 'body_marker_names.json', parent / 'marker_names.json', parent / 'markers_meta.json']
 
     for path in candidates:
         if path.exists():

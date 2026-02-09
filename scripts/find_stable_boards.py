@@ -59,10 +59,10 @@ class CharucoBoardDetector:
             )
 
         # ArUco detection parameters
-        if hasattr(cv2.aruco, 'DetectorParameters'):
-            self.aruco_params = cv2.aruco.DetectorParameters()
-        else:
+        if hasattr(cv2.aruco, 'DetectorParameters_create'):
             self.aruco_params = cv2.aruco.DetectorParameters_create()
+        else:
+            self.aruco_params = cv2.aruco.DetectorParameters()
             
         if 'aruco_params' in config:
             aruco_config = config['aruco_params']
@@ -335,28 +335,30 @@ def main():
 
         print(f"Output directory: {output_path}")
 
-        total_copied = 0
-        for camera, indices in results.items():
-            if not indices:
-                print(f"[{camera}] No stable frames to copy")
-                continue
+        # Use union of all stable frame indices for all cameras
+        # so that every camera directory has the same filenames
+        # (multical requires matching filenames across cameras)
+        union_indices = sorted(indices_set)
 
+        total_copied = 0
+        for camera in results.keys():
             # Create camera output directory
             cam_output_dir = os.path.join(output_path, camera)
             os.makedirs(cam_output_dir, exist_ok=True)
 
-            # Copy stable frames
+            # Copy union frames from this camera's original directory
             cam_input_dir = os.path.join(path_data, camera)
+            cam_copied = 0
 
-            for frame_idx in indices:
-                # Find source frame file
-                src_pattern = os.path.join(cam_input_dir, f"frame_{frame_idx:08d}.jpg")
-                if os.path.exists(src_pattern):
-                    dst_file = os.path.join(cam_output_dir, f"frame_{frame_idx:08d}.jpg")
-                    shutil.copy2(src_pattern, dst_file)
+            for frame_idx in union_indices:
+                src_file = os.path.join(cam_input_dir, f"frame_{frame_idx:04d}.jpg")
+                if os.path.exists(src_file):
+                    dst_file = os.path.join(cam_output_dir, f"frame_{frame_idx:04d}.jpg")
+                    shutil.copy2(src_file, dst_file)
                     total_copied += 1
+                    cam_copied += 1
 
-            print(f"[{camera}] Copied {len(indices)} frames")
+            print(f"[{camera}] Copied {cam_copied}/{len(union_indices)} frames")
 
         print(f"\n✓ Total frames copied: {total_copied}")
         print(f"✓ Output: {output_path}")

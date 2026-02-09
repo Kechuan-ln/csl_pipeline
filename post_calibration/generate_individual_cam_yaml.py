@@ -36,9 +36,10 @@ def load_base_transforms(calib_file, refined_yaml):
 
     R_mocap_to_cam19, _ = cv2.Rodrigues(rvec_mocap_to_cam19)
 
-    # Compute cam19 -> cam1
-    R_cam1_to_cam19 = np.array(calib['camera_base2cam']['cam19_to_cam1']['R'])
-    T_cam1_to_cam19 = np.array(calib['camera_base2cam']['cam19_to_cam1']['T'])
+    # Compute cam19 -> cam1 (support both multical output formats)
+    poses_key = 'camera_poses' if 'camera_poses' in calib else 'camera_base2cam'
+    R_cam1_to_cam19 = np.array(calib[poses_key]['cam19_to_cam1']['R'])
+    T_cam1_to_cam19 = np.array(calib[poses_key]['cam19_to_cam1']['T'])
     R_cam19_to_cam1 = R_cam1_to_cam19.T
     T_cam19_to_cam1 = -R_cam1_to_cam19.T @ T_cam1_to_cam19
 
@@ -68,8 +69,9 @@ def compute_mocap_to_cam(cam_name, calib, R_mocap_to_cam19, tvec_mocap_to_cam19,
         else:
             # cam1 -> camX (from calibration.json)
             key = f"{cam_name}_to_cam1"
-            R_cam1_to_camX = np.array(calib['camera_base2cam'][key]['R'])
-            T_cam1_to_camX = np.array(calib['camera_base2cam'][key]['T'])
+            poses_key = 'camera_poses' if 'camera_poses' in calib else 'camera_base2cam'
+            R_cam1_to_camX = np.array(calib[poses_key][key]['R'])
+            T_cam1_to_camX = np.array(calib[poses_key][key]['T'])
 
             # Mocap -> cam1 -> camX
             R_final = R_cam1_to_camX @ R_mocap_to_cam1

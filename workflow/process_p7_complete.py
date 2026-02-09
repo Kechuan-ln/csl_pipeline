@@ -41,6 +41,7 @@ import shutil
 import json
 from pathlib import Path
 from typing import List
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Add csl_pipeline paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -268,6 +269,8 @@ def phase3_calibration(calibration_session, output_dir, start_time, duration, fp
         if cam19_video.exists():
             cameras.append(("cam19", cam19_video))
 
+        # Build list of cameras that need extraction
+        cameras_to_extract = []
         for cam_name, video_path in cameras:
             cam_output = output_frames / cam_name
             cam_output.mkdir(parents=True, exist_ok=True)
@@ -277,19 +280,52 @@ def phase3_calibration(calibration_session, output_dir, start_time, duration, fp
                 print(f"  {cam_name}: Skipping ({len(existing)} frames exist)")
                 continue
 
-            print(f"  {cam_name}: Extracting...")
+            cameras_to_extract.append((cam_name, video_path))
 
-            cmd = [
-                "python", os.path.join(CSL_ROOT, "scripts", "convert_video_to_images.py"),
-                "--src_tag", str(session_synced),
-                "--cam_tags", cam_name,
-                "--fps", str(fps),
-                "--ss", str(start_time),
-                "--duration", str(duration),
-                "--format", "jpg"
-            ]
+        if cameras_to_extract:
+            max_workers = min(8, len(cameras_to_extract))
+            print(f"\n  Extracting {len(cameras_to_extract)} cameras in parallel (workers={max_workers})...")
 
-            run_command(cmd, f"Extract frames for {cam_name}", check=False)
+            # Launch all ffmpeg processes in parallel
+            procs = {}
+            for cam_name, video_path in cameras_to_extract:
+                cmd = [
+                    "python", os.path.join(CSL_ROOT, "scripts", "convert_video_to_images.py"),
+                    "--src_tag", str(session_synced),
+                    "--cam_tags", cam_name,
+                    "--fps", str(fps),
+                    "--ss", str(start_time),
+                    "--duration", str(duration),
+                    "--format", "jpg"
+                ]
+                print(f"  {cam_name}: Starting extraction...")
+                procs[cam_name] = subprocess.Popen(cmd)
+
+                # Limit concurrency: wait if we hit max_workers
+                if len(procs) >= max_workers:
+                    # Wait for any one to finish
+                    for done_cam in list(procs):
+                        ret = procs[done_cam].poll()
+                        if ret is not None:
+                            status = "done" if ret == 0 else f"failed (exit {ret})"
+                            print(f"  {done_cam}: Extraction {status}")
+                            del procs[done_cam]
+                            break
+                    else:
+                        # None finished yet, wait for the first one submitted
+                        first_cam = next(iter(procs))
+                        procs[first_cam].wait()
+                        ret = procs[first_cam].returncode
+                        status = "done" if ret == 0 else f"failed (exit {ret})"
+                        print(f"  {first_cam}: Extraction {status}")
+                        del procs[first_cam]
+
+            # Wait for remaining processes
+            for cam_name, proc in procs.items():
+                proc.wait()
+                ret = proc.returncode
+                status = "done" if ret == 0 else f"failed (exit {ret})"
+                print(f"  {cam_name}: Extraction {status}")
 
     # Step 3.2: Find stable frames
     print("\n  [3.2] Detecting stable frames...")
@@ -429,10 +465,11 @@ def phase5_distribute_gt(mocap_dir, output_dir, sessions):
         # Blade edges (support multiple blades: Rblade_edges.npy, lblade2_edges.npy, etc.)
         blade_files = sorted(session_mocap.glob("*_edges.npy"))
 
-        # Filter out edge1/edge2 files (we only want the final aligned edges)
+        # Filter out edge1/edge2 files and macOS resource forks (._*)
         blade_files = [f for f in blade_files
                        if not f.name.endswith("_edge1.npy")
-                       and not f.name.endswith("_edge2.npy")]
+                       and not f.name.endswith("_edge2.npy")
+                       and not f.name.startswith("._")]
 
         if blade_files:
             print(f"  Found {len(blade_files)} blade(s): {', '.join(f.name for f in blade_files)}")
