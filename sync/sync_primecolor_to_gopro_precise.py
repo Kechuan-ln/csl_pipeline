@@ -526,6 +526,9 @@ def main():
     print("\n" + "=" * 80)
     print("步骤 2: 扫描 GoPro 视频")
     print("=" * 80)
+    print(f"  GoPro 视频路径: {args.gopro_video}")
+    print(f"  文件存在: {os.path.exists(args.gopro_video)}")
+
     gopro_detections = scan_video_qr_segment(
         args.gopro_video,
         start_time=0.0,
@@ -538,6 +541,10 @@ def main():
     gopro_info = get_video_info(args.gopro_video)
     print(f"  检测到 {len(gopro_detections)} 个 QR 码")
     print(f"  视频信息: {gopro_info['fps']:.2f}fps, {gopro_info['duration']:.2f}s")
+
+    if not gopro_detections:
+        print(f"  ⚠️ 警告: GoPro 视频未检测到 QR 码！")
+        print(f"  提示: 检查视频是否包含 QR 码，或尝试增加 --scan_duration 和 --min_detections")
 
     # 步骤 3: 扫描 PrimeColor
     print("\n" + "=" * 80)
