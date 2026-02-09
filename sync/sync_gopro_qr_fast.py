@@ -888,13 +888,13 @@ def get_hardware_encoder(codec: str) -> List[str]:
 
     if codec in ['hevc', 'h265']:
         if sys.platform == 'darwin' and 'hevc_videotoolbox' in encoders:
-            return ['hevc_videotoolbox', '-q:v', '65']
+            return ['hevc_videotoolbox', '-b:v', '50M']
         elif 'hevc_nvenc' in encoders:
             return ['hevc_nvenc', '-preset', 'p1', '-cq', '18']
         return ['libx265', '-preset', 'ultrafast', '-crf', '18']
     else:
         if sys.platform == 'darwin' and 'h264_videotoolbox' in encoders:
-            return ['h264_videotoolbox', '-q:v', '65']
+            return ['h264_videotoolbox', '-b:v', '50M']
         elif 'h264_nvenc' in encoders:
             return ['h264_nvenc', '-preset', 'p1', '-cq', '18']
         return ['libx264', '-preset', 'ultrafast', '-crf', '18']
@@ -1033,7 +1033,7 @@ def get_hardware_encoder(codec: str = 'hevc') -> List[str]:
     if codec in ['hevc', 'h265']:
         # HEVC编码器
         if sys.platform == 'darwin' and 'hevc_videotoolbox' in encoders_output:
-            return ['hevc_videotoolbox', '-q:v', '65']
+            return ['hevc_videotoolbox', '-b:v', '50M']
         elif 'hevc_nvenc' in encoders_output:
             return ['hevc_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '18']
         else:
@@ -1041,7 +1041,7 @@ def get_hardware_encoder(codec: str = 'hevc') -> List[str]:
     else:
         # H.264编码器
         if sys.platform == 'darwin' and 'h264_videotoolbox' in encoders_output:
-            return ['h264_videotoolbox', '-q:v', '65']
+            return ['h264_videotoolbox', '-b:v', '50M']
         elif 'h264_nvenc' in encoders_output:
             return ['h264_nvenc', '-preset', 'p1', '-rc', 'vbr', '-cq', '18']
         else:

@@ -34,21 +34,35 @@ class CharucoBoardDetector:
         
         # Create ArUco dictionary
         aruco_dict_name = board_config['aruco_dict']
-        if aruco_dict_name == '7X7_250':
-            self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_7X7_250)
-        elif aruco_dict_name == '4X4_100':
-            self.aruco_dict = cv2.aruco.Dictionary_get(cv2.aruco.DICT_4X4_100)
-        else:
+        dict_map = {
+            '7X7_250': cv2.aruco.DICT_7X7_250,
+            '4X4_100': cv2.aruco.DICT_4X4_100,
+            '5X5_100': cv2.aruco.DICT_5X5_100,
+        }
+        if aruco_dict_name not in dict_map:
             raise ValueError(f"Unsupported ArUco dictionary: {aruco_dict_name}")
-        
+
+        if hasattr(cv2.aruco, 'getPredefinedDictionary'):
+            self.aruco_dict = cv2.aruco.getPredefinedDictionary(dict_map[aruco_dict_name])
+        else:
+            self.aruco_dict = cv2.aruco.Dictionary_get(dict_map[aruco_dict_name])
+
         # Create ChArUco board
-        width, height = self.size
-        self.board = cv2.aruco.CharucoBoard_create(
-            width, height, self.square_length, self.marker_length, self.aruco_dict
-        )
-        
+        if hasattr(cv2.aruco, 'CharucoBoard') and not hasattr(cv2.aruco, 'CharucoBoard_create'):
+            self.board = cv2.aruco.CharucoBoard(
+                self.size, self.square_length, self.marker_length, self.aruco_dict
+            )
+        else:
+            width, height = self.size
+            self.board = cv2.aruco.CharucoBoard_create(
+                width, height, self.square_length, self.marker_length, self.aruco_dict
+            )
+
         # ArUco detection parameters
-        self.aruco_params = cv2.aruco.DetectorParameters_create()
+        if hasattr(cv2.aruco, 'DetectorParameters'):
+            self.aruco_params = cv2.aruco.DetectorParameters()
+        else:
+            self.aruco_params = cv2.aruco.DetectorParameters_create()
             
         if 'aruco_params' in config:
             aruco_config = config['aruco_params']

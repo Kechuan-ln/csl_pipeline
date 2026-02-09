@@ -30,7 +30,9 @@ def process_video_folder(src_dir, target_dir, list_cam_tags, fps, duration, ss, 
         print(f"\n[{cam_tag}] Checking camera path: {cam_path}")
         print(f"[{cam_tag}] Path exists: {os.path.exists(cam_path)}")
 
-        mp4_files = glob.glob(os.path.join(cam_path, "*.MP4"))
+        mp4_files = glob.glob(os.path.join(cam_path, "*.MP4")) + glob.glob(os.path.join(cam_path, "*.mp4"))
+        # Deduplicate in case filesystem is case-insensitive
+        mp4_files = list(dict.fromkeys(mp4_files))
         print(f"[{cam_tag}] Found {len(mp4_files)} MP4 files")
 
         for path_video in mp4_files:
