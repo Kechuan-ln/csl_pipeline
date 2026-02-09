@@ -141,7 +141,7 @@ def phase1_gopro_sync(organized_dir, output_dir, anchor_video, sessions):
     print_success("All GoPro sessions synchronized")
 
 
-def phase2_primecolor_sync(mocap_dir, output_dir, sessions):
+def phase2_primecolor_sync(mocap_dir, output_dir, sessions, anchor_video):
     """Phase 2: Synchronize all PrimeColor sessions."""
     print_phase(2, 5, "PrimeColor Synchronization")
 
@@ -164,15 +164,26 @@ def phase2_primecolor_sync(mocap_dir, output_dir, sessions):
 
         print(f"\n  Syncing {session}...")
 
-        # Read GoPro meta_info
-        meta_file = session_synced / "meta_info.json"
-        check_file_exists(meta_file)
+        # Find a GoPro video as reference (use cam1)
+        gopro_video = None
+        for cam_dir in sorted(session_synced.glob("cam*")):
+            if cam_dir.is_dir() and cam_dir.name != "cam19":
+                videos = list(cam_dir.glob("*.MP4")) + list(cam_dir.glob("*.mp4"))
+                if videos:
+                    gopro_video = videos[0]
+                    break
+
+        if not gopro_video:
+            print_error(f"{session}: No GoPro video found, skipping")
+            continue
 
         cmd = [
             "python", os.path.join(CSL_ROOT, "sync", "sync_primecolor_to_gopro_precise.py"),
-            "--primecolor", str(primecolor_input),
-            "--gopro_meta", str(meta_file),
-            "--output_dir", str(session_synced / "cam19")
+            "--gopro_video", str(gopro_video),
+            "--primecolor_video", str(primecolor_input),
+            "--anchor_video", str(anchor_video),
+            "--output_dir", str(session_synced / "cam19"),
+            "--skip_csv"  # Skip CSV sync for now
         ]
 
         run_command(cmd, f"PrimeColor sync for {session}")
@@ -540,7 +551,7 @@ def main():
     # Execute pipeline
     try:
         phase1_gopro_sync(organized_dir, output_dir, args.anchor_video, args.sessions)
-        phase2_primecolor_sync(mocap_dir, output_dir, args.sessions)
+        phase2_primecolor_sync(mocap_dir, output_dir, args.sessions, args.anchor_video)
         phase3_calibration(args.calibration_session, output_dir, args.start_time, args.duration, args.fps)
         phase4_generate_yamls(args.calibration_session, cam19_refined, output_dir, args.sessions)
         phase5_distribute_gt(mocap_dir, output_dir, args.sessions)
