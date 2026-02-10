@@ -7,7 +7,17 @@
 
 ---
 
-## Timeline (Feb 10 ~ Feb 16, deliver Feb 17)
+## Timeline (Feb 10 PM ~ Feb 16, deliver Feb 17)
+
+### Strategy: Annotate-As-You-Go
+
+Instead of doing all verification first and annotation last, **annotate each participant immediately after its data is ready**. This produces usable results incrementally.
+
+- **P1~P4**: Already fully processed → annotate first (no dependencies)
+- **P5**: Verify P5_3~P5_5 → annotate all P5 sessions
+- **P6**: Verify P6_1~P6_5 → annotate all P6 sessions
+- **P7**: Refine cameras → annotate all P7 sessions
+- **P8**: Full pipeline → annotate all P8 sessions (last)
 
 ### Time Estimates
 
@@ -36,82 +46,87 @@
 
 ```
 ═══════════════════════════════════════════════════════════════════════
- Feb 10 (Mon)                                              Day 1
+ Feb 10 (Mon) PM only                                      Day 1
 ───────────────────────────────────────────────────────────────────────
- AM │ Task 3 Phase 0: Organize P8 data                     [1h]
+ PM │ Task 3 Phase 0: Organize P8 data                     [1h]
     │ Task 3 Phase 1: Start mocap processing  ░░░░░░░░░░░  [auto 2h]
-    │   ├── while waiting ──→ Task 1: Verify P5_3~P5_5     [1.5h]
-    │
- PM │ Task 1: Verify P6_1~P6_3                             [1.5h]
-    │ Task 1: Fix any problem cameras found today           [~1h]
+    │   ├── while waiting:
+    │   │   ★ Annotate P1 (data ready)                     [~1h]
+    │   │   ★ Annotate P2 (data ready)                     [~1h]
 ───────────────────────────────────────────────────────────────────────
- Completed: Task 3 Phase 0 + Phase 1 auto, Task 1 partial
- Hours: ~5h manual
+ Completed: Task 3 Phase 0 + Phase 1 auto, P1✓ P2✓ annotated
+ Hours: ~3h manual
+ Annotation progress: ██░░░░░░ P1✓ P2✓
 
 ═══════════════════════════════════════════════════════════════════════
  Feb 11 (Tue)                                              Day 2
 ───────────────────────────────────────────────────────────────────────
- AM │ Task 1: Verify P6_4~P6_5 + remaining fixes           [2h]
-    │ Task 3 Phase 1: Blade annotation (manual)             [2.5h]
+ AM │ ★ Annotate P3 + P4 (data ready)                      [~2h]
+    │ Task 1: Verify P5_3~P5_5                              [1.5h]
     │
- PM │ Task 3 Phase 2: Blade extraction  ░░░░░  [auto 1h]
-    │   ├── while waiting ──→ Task 4: Annotate P1           [~1h]
-    │ Task 3 Phase 2: cam19 refinement                      [1h]
+ PM │ ★ Annotate P5 (just verified)                        [~1h]
+    │ Task 3 Phase 1: Blade annotation (manual)             [2.5h]
 ───────────────────────────────────────────────────────────────────────
- Completed: Task 1 done ✓, Task 3 Phase 1+2 done
- Hours: ~6.5h manual
+ Completed: P3✓ P4✓ P5✓ annotated, Task 1 partial
+ Hours: ~7h manual
+ Annotation progress: █████░░░ P1✓ P2✓ P3✓ P4✓ P5✓
 
 ═══════════════════════════════════════════════════════════════════════
  Feb 12 (Wed)                                              Day 3
 ───────────────────────────────────────────────────────────────────────
- AM │ Task 3 Phase 3: Start GoPro pipeline  ░░░░░░░░░░░░░  [auto 3h]
-    │   ├── while waiting ──→ Task 2: Refine P7_4 cameras   [3h]
-    │                         (cam1~cam6, ~6 cameras)
+ AM │ Task 1: Verify P6_1~P6_5 + fixes                     [3.5h]
     │
- PM │ Task 2: Continue refining P7_4 cameras                [4h]
-    │         (cam7~cam18, ~8 cameras)
+ PM │ ★ Annotate P6 (just verified)                        [~1h]
+    │ Task 3 Phase 2: Blade extraction  ░░░░░  [auto 1h]
+    │ Task 3 Phase 2: cam19 refinement                      [1h]
+    │ Task 3 Phase 3: Start GoPro pipeline  ░░░  [auto, runs overnight]
 ───────────────────────────────────────────────────────────────────────
- Completed: Task 3 Phase 3 auto done, Task 2 refinement done
- Hours: ~7h manual
+ Completed: Task 1 done ✓, P6✓ annotated, Task 3 Phase 2+3 started
+ Hours: ~5.5h manual
+ Annotation progress: ██████░░ P1✓ P2✓ P3✓ P4✓ P5✓ P6✓
 
 ═══════════════════════════════════════════════════════════════════════
  Feb 13 (Thu)                                              Day 4
 ───────────────────────────────────────────────────────────────────────
- AM │ Task 2: Copy params to P7_1~P7_5 + redistribute GT   [1h]
-    │ Task 2: Verify sync for P7 sessions                   [1.5h]
-    │ Task 2: Fix individual problem cameras                [0.5h]
+ AM │ Task 2: Refine P7_4 cameras (cam1~cam8)               [4h]
+    │   (Task 3 Phase 3 auto completes during this time)
     │
- PM │ Task 3 Phase 4: Verify all P8 sessions                [2h]
-    │ Task 4: Annotate P2~P3                                [~2h]
+ PM │ Task 2: Refine P7_4 cameras (cam9~cam18)              [3h]
 ───────────────────────────────────────────────────────────────────────
- Completed: Task 2 done ✓, Task 3 done ✓
+ Completed: Task 2 refinement done, Task 3 Phase 3 auto done
  Hours: ~7h manual
 
 ═══════════════════════════════════════════════════════════════════════
  Feb 14 (Fri)                                              Day 5
 ───────────────────────────────────────────────────────────────────────
- AM │ Task 4: Annotate P4~P5                                [~2h]
- PM │ Task 4: Annotate P6~P7                                [~2h]
+ AM │ Task 2: Copy params + redistribute GT + verify sync   [2.5h]
+    │ Task 2: Fix individual problem cameras                [0.5h]
+    │ ★ Annotate P7 (just refined)                         [~1h]
+    │
+ PM │ Task 3 Phase 4: Verify all P8 sessions                [2h]
+    │ ★ Annotate P8 (just verified)                        [~1h]
 ───────────────────────────────────────────────────────────────────────
- Completed: Task 4 partial (P1~P7 done)
- Hours: ~4h manual
+ Completed: Task 2 done ✓, Task 3 done ✓, P7✓ P8✓ annotated
+ Hours: ~7h manual
+ Annotation progress: ████████ P1✓ P2✓ P3✓ P4✓ P5✓ P6✓ P7✓ P8✓
 
 ═══════════════════════════════════════════════════════════════════════
  Feb 15~16 (Sat~Sun)                                    Day 6~7
 ───────────────────────────────────────────────────────────────────────
-    │ Task 4: Annotate P8                                   [~1h]
-    │ Task 4: Final CSV review + consistency check          [0.5h]
+    │ Final CSV review + consistency check                  [0.5h]
     │ Buffer: re-fix any issues found during annotation     [~2h]
 ───────────────────────────────────────────────────────────────────────
- Completed: Task 4 done ✓, ALL TASKS DONE ✓
+ Completed: ALL TASKS DONE ✓
 ═══════════════════════════════════════════════════════════════════════
 ```
 
-### Key Parallelism
+### Key Design Decisions
 
-- **Task 3 automated steps** (mocap processing, blade extraction, GoPro pipeline) have ~6h of wait time → use for Task 1 verification and Task 4 annotation
-- **Task 4 annotation** for P1~P7 can start from Day 1 (data ready); P8 annotation must wait until Task 3 is complete (Day 4+)
-- **Task 2** (P7 refinement) is the longest manual block (~10h) → scheduled as a focused day (Day 3)
+- **Annotation-first for P1~P4**: Data is already ready, no dependencies. Do these immediately on Day 1~2 to produce early results
+- **Verify → Annotate pipeline**: For P5/P6/P7/P8, annotate each participant right after its verification/refinement is done, not in a separate batch later
+- **Task 2 (P7 refine) as focused day**: 14 cameras × 30 min is the largest manual block, scheduled as Day 4 without interruption
+- **Task 3 automated waits**: ~6h of pipeline wait time filled with annotation (Day 1) and verification (Day 3)
+- **Day 6~7 buffer**: Only final review + fixes, all core work finishes by Day 5
 
 ---
 
