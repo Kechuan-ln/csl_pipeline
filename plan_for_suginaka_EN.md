@@ -2,7 +2,116 @@
 
 **For: Suginaka-san**
 **Created: 2026-02-09**
+**Deadline: 2026-02-17**
 **Reference: `workflow/P7_complete_workflow_EN.md` for detailed tool usage**
+
+---
+
+## Timeline (Feb 10 ~ Feb 16, deliver Feb 17)
+
+### Time Estimates
+
+| Task | Subtask | Est. Hours | Notes |
+|------|---------|-----------|-------|
+| **Task 1** | P5_3~P5_5 sync + calibration check | 1.5h | 3 sessions × 30 min |
+| | P6_1~P6_5 sync + calibration check | 2.5h | 5 sessions × 30 min |
+| | Fix problem cameras (if any) | 1~2h | Copy YAML or re-refine |
+| | **Task 1 Total** | **~5h** | |
+| **Task 2** | Refine 14 GoPro cameras on P7_4 | 7h | 14 cams × 30 min (marker annotation + optimize) |
+| | Copy params + redistribute GT | 1h | Scripted, mostly waiting |
+| | Verify sync + fix individual cameras | 2h | Spot-check several sessions |
+| | **Task 2 Total** | **~10h** | |
+| **Task 3** | Phase 0: Organize P8 data | 1h | Manual file organization |
+| | Phase 1: Mocap processing (automated) | 0.5h setup + **2h wait** | Pipeline runs automatically |
+| | Phase 1: Blade annotation (manual) | 2.5h | HTML editor, per-session |
+| | Phase 2: Blade extraction + cam19 refine | 0.5h + **1h wait** + 1h refine | cam19 marker annotation |
+| | Phase 3: GoPro pipeline (automated) | 0.5h setup + **3h wait** | sync + calibration + GT |
+| | Phase 4: Verify all P8 sessions | 2h | Sync + calibration check |
+| | **Task 3 Total** | **~8h manual + ~6h wait** | Wait time usable for other tasks |
+| **Task 4** | Annotation P1~P8 (~36 sessions) | 6h | ~10 min per session |
+| | **Task 4 Total** | **~6h** | |
+| | **Grand Total** | **~29h manual + ~6h wait** | |
+
+### Daily Schedule
+
+```
+═══════════════════════════════════════════════════════════════════════
+ Feb 10 (Mon)                                              Day 1
+───────────────────────────────────────────────────────────────────────
+ AM │ Task 3 Phase 0: Organize P8 data                     [1h]
+    │ Task 3 Phase 1: Start mocap processing  ░░░░░░░░░░░  [auto 2h]
+    │   ├── while waiting ──→ Task 1: Verify P5_3~P5_5     [1.5h]
+    │
+ PM │ Task 1: Verify P6_1~P6_3                             [1.5h]
+    │ Task 1: Fix any problem cameras found today           [~1h]
+───────────────────────────────────────────────────────────────────────
+ Completed: Task 3 Phase 0 + Phase 1 auto, Task 1 partial
+ Hours: ~5h manual
+
+═══════════════════════════════════════════════════════════════════════
+ Feb 11 (Tue)                                              Day 2
+───────────────────────────────────────────────────────────────────────
+ AM │ Task 1: Verify P6_4~P6_5 + remaining fixes           [2h]
+    │ Task 3 Phase 1: Blade annotation (manual)             [2.5h]
+    │
+ PM │ Task 3 Phase 2: Blade extraction  ░░░░░  [auto 1h]
+    │   ├── while waiting ──→ Task 4: Annotate P1           [~1h]
+    │ Task 3 Phase 2: cam19 refinement                      [1h]
+───────────────────────────────────────────────────────────────────────
+ Completed: Task 1 done ✓, Task 3 Phase 1+2 done
+ Hours: ~6.5h manual
+
+═══════════════════════════════════════════════════════════════════════
+ Feb 12 (Wed)                                              Day 3
+───────────────────────────────────────────────────────────────────────
+ AM │ Task 3 Phase 3: Start GoPro pipeline  ░░░░░░░░░░░░░  [auto 3h]
+    │   ├── while waiting ──→ Task 2: Refine P7_4 cameras   [3h]
+    │                         (cam1~cam6, ~6 cameras)
+    │
+ PM │ Task 2: Continue refining P7_4 cameras                [4h]
+    │         (cam7~cam18, ~8 cameras)
+───────────────────────────────────────────────────────────────────────
+ Completed: Task 3 Phase 3 auto done, Task 2 refinement done
+ Hours: ~7h manual
+
+═══════════════════════════════════════════════════════════════════════
+ Feb 13 (Thu)                                              Day 4
+───────────────────────────────────────────────────────────────────────
+ AM │ Task 2: Copy params to P7_1~P7_5 + redistribute GT   [1h]
+    │ Task 2: Verify sync for P7 sessions                   [1.5h]
+    │ Task 2: Fix individual problem cameras                [0.5h]
+    │
+ PM │ Task 3 Phase 4: Verify all P8 sessions                [2h]
+    │ Task 4: Annotate P2~P3                                [~2h]
+───────────────────────────────────────────────────────────────────────
+ Completed: Task 2 done ✓, Task 3 done ✓
+ Hours: ~7h manual
+
+═══════════════════════════════════════════════════════════════════════
+ Feb 14 (Fri)                                              Day 5
+───────────────────────────────────────────────────────────────────────
+ AM │ Task 4: Annotate P4~P5                                [~2h]
+ PM │ Task 4: Annotate P6~P7                                [~2h]
+───────────────────────────────────────────────────────────────────────
+ Completed: Task 4 partial (P1~P7 done)
+ Hours: ~4h manual
+
+═══════════════════════════════════════════════════════════════════════
+ Feb 15~16 (Sat~Sun)                                    Day 6~7
+───────────────────────────────────────────────────────────────────────
+    │ Task 4: Annotate P8                                   [~1h]
+    │ Task 4: Final CSV review + consistency check          [0.5h]
+    │ Buffer: re-fix any issues found during annotation     [~2h]
+───────────────────────────────────────────────────────────────────────
+ Completed: Task 4 done ✓, ALL TASKS DONE ✓
+═══════════════════════════════════════════════════════════════════════
+```
+
+### Key Parallelism
+
+- **Task 3 automated steps** (mocap processing, blade extraction, GoPro pipeline) have ~6h of wait time → use for Task 1 verification and Task 4 annotation
+- **Task 4 annotation** for P1~P7 can start from Day 1 (data ready); P8 annotation must wait until Task 3 is complete (Day 4+)
+- **Task 2** (P7 refinement) is the longest manual block (~10h) → scheduled as a focused day (Day 3)
 
 ---
 
@@ -15,6 +124,7 @@
 | P6_1 ~ P6_5 | Camera params + GT generated | Calibration & sync verification |
 | P7_1 ~ P7_5 | Pipeline complete | Refine individual GoPro params + sync check |
 | P8_1 ~ P8_? | Not started | Full pipeline processing |
+| P1 ~ P8 (all) | Not started | **Task 4**: Action temporal annotation (cam1 GT overlay → CSV) |
 
 ## Data Locations
 
@@ -268,6 +378,75 @@ Same as Tasks 1 and 2 above: verify calibration + sync for all sessions and came
 
 ---
 
+## Task 4: Dataset Action Annotation (P1~P8)
+
+Annotate the temporal segments of each action across all sessions (P1 through P8) to create a structured dataset index. The goal is to produce a single CSV file that maps every action to its valid time segments.
+
+### Output Format
+
+A single CSV file: `dataset_annotations.csv` (saved in the project root or a shared location).
+
+Columns:
+
+| action | session | S1 | E1 | S2 | E2 | S3 | E3 | ... |
+|--------|---------|-----|-----|-----|-----|-----|-----|-----|
+| running on treadmill | P1_1 | 12.5 | 45.0 | 80.2 | 110.0 | | | |
+| walking | P1_1 | 120.0 | 155.3 | | | | | |
+| running on treadmill | P2_3 | 5.0 | 38.0 | | | | | |
+
+- **action**: Predefined action name (consult experiment protocol for the full list)
+- **session**: Which session this action appears in (e.g., P2_3)
+- **S1, E1, S2, E2, ...**: Start and end times in **cam1 video seconds** (absolute time from 0:00). Multiple segments allowed if the same action is performed more than once, or if a continuous segment has a quality break in the middle
+- Only include segments with **good data quality** (see quality criteria below)
+
+### Step-by-step
+
+For each session (P1_1, P1_2, ..., P8_N):
+
+#### 1. Open cam1 video with GT overlay
+
+```bash
+python post_calibration/verify_gt_offset.py \
+    --session_dir /Volumes/HumanDATA/Prohuman/synced/PX_Y_sync/cameras_synced \
+    --camera cam1 \
+    --start 0 \
+    --duration -1
+```
+
+Use `Space` to play/pause, `[`/`]` to step frame-by-frame.
+
+#### 2. Identify action segments
+
+Watch the video and identify when each predefined action starts and ends. Note the **cam1 video timestamp** (shown in the player) for each start/end point.
+
+#### 3. Check data quality
+
+For each segment, verify the following before recording it:
+
+- **Prosthetic limbs stay in frame**: The blade/prosthetic should remain visible in the cam1 view throughout the segment
+- **GT skeleton aligns correctly**: No flying joints, no sudden jumps, no joints stuck at (0,0,0)
+- **Subject is performing the expected action**: The motion matches what the action name describes
+- **No major occlusions**: The subject's body is reasonably visible
+
+**If a segment has quality issues**: Do NOT include it in the CSV. If only part of a segment is good, split it into sub-segments and only record the good parts (e.g., S1=10, E1=25, S2=30, E2=50 if frames 25-30 are bad).
+
+#### 4. Record to CSV
+
+For each valid action segment, add a row to `dataset_annotations.csv` with:
+- The action name
+- The session ID (e.g., P3_2)
+- Start/end seconds for each valid sub-segment
+
+### Notes
+
+- **Only cam1 is needed** for all annotation work
+- The number of sessions varies per participant (not all have 5)
+- Check the experiment protocol or video content to determine the full action list for each participant
+- It is normal for the same action to appear in multiple sessions, or for one session to contain multiple different actions
+- When in doubt about data quality, err on the side of excluding the segment
+
+---
+
 ## Checklist
 
 ### P5 + P6 Verification
@@ -294,3 +473,15 @@ Same as Tasks 1 and 2 above: verify calibration + sync for all sessions and came
 - [ ] Phase 2: Blade extraction + cam19 refinement
 - [ ] Phase 3: GoPro pipeline (sync + calibration + GT)
 - [ ] Verify calibration + sync for all P8 sessions
+
+### Dataset Action Annotation
+- [ ] Determine the full action list from experiment protocol
+- [ ] P1: Annotate all sessions (cam1 GT overlay, record valid segments)
+- [ ] P2: Annotate all sessions
+- [ ] P3: Annotate all sessions
+- [ ] P4: Annotate all sessions
+- [ ] P5: Annotate all sessions
+- [ ] P6: Annotate all sessions
+- [ ] P7: Annotate all sessions
+- [ ] P8: Annotate all sessions
+- [ ] Final review: check CSV completeness and consistency
