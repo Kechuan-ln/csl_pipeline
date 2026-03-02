@@ -27,9 +27,6 @@ Controls (while paused):
     ,/.       : Offset +/-0.5 frame
     e         : Save offset + redistribute GT for this camera
     q         : Quit
-
-    Trackbar "Offset"  : Drag to set offset (range +/-20.0, step 0.5)
-    Trackbar "Frame"   : Seek within clip
 """
 
 import argparse
@@ -56,9 +53,15 @@ H36M_BONES = [
 ]
 
 SKELETON_COLOR = (0, 255, 0)          # green
-BLADE_EDGE_COLOR = (0, 255, 255)      # yellow
-BLADE_FILL_COLOR = (255, 180, 0)      # orange-ish for fill
 BLADE_FILL_ALPHA = 0.35
+
+# Per-blade color palette: (edge_color, fill_color)
+BLADE_COLORS = [
+    ((0, 255, 255), (255, 180, 0)),   # yellow edges, orange fill
+    ((255, 255, 0), (0, 180, 255)),   # cyan edges, blue fill
+    ((255, 0, 255), (180, 0, 255)),   # magenta edges, purple fill
+    ((0, 255, 128), (0, 200, 100)),   # green edges, teal fill
+]
 
 
 def load_camera_yaml(yaml_path):
@@ -78,10 +81,6 @@ def load_camera_yaml(yaml_path):
 
 class GTOffsetPlayer:
     """Pre-load a video clip, overlay projected skeleton, play back for offset tuning."""
-
-    TB_CENTER = 20    # trackbar midpoint (maps to offset 0.0)
-    TB_MAX = 40       # trackbar max (maps to offset +20.0)
-    TB_STEP = 1.0     # each trackbar tick = 1 gopro frame
 
     def __init__(self, session_dir, camera, start_sec=60.0, duration=10.0,
                  camera_yaml=None, start_frame=None):
@@ -124,12 +123,23 @@ class GTOffsetPlayer:
         self.n_mocap = self.skeleton.shape[0]
         print(f"Skeleton: {skel_path.name} {self.skeleton.shape}")
 
-        # --- Blade edges (optional) ---
-        edges_path = self.session_dir / "cam19" / "aligned_edges.npy"
-        self.blade_edges = None
-        if edges_path.exists():
-            self.blade_edges = np.load(str(edges_path))
-            print(f"Blade: {edges_path.name} {self.blade_edges.shape}")
+        # --- Blade edges (optional, supports multiple blades) ---
+        cam19 = self.session_dir / "cam19"
+        self.blade_edges = {}  # name -> array
+        named_edges = sorted([
+            p for p in cam19.glob("*_edges.npy")
+            if p.name != "aligned_edges.npy"
+        ])
+        if named_edges:
+            for p in named_edges:
+                name = p.name.replace("_edges.npy", "")
+                self.blade_edges[name] = np.load(str(p))
+                print(f"Blade: {p.name} {self.blade_edges[name].shape}")
+        else:
+            edges_path = cam19 / "aligned_edges.npy"
+            if edges_path.exists():
+                self.blade_edges["blade"] = np.load(str(edges_path))
+                print(f"Blade: {edges_path.name} {self.blade_edges['blade'].shape}")
 
         # --- Sync mapping ---
         sync_path = self.session_dir / "cam19" / "sync_mapping.json"
@@ -168,17 +178,10 @@ class GTOffsetPlayer:
         # --- State ---
         self.clip_idx = 0
 
-        # --- Window + trackbars ---
+        # --- Window (no trackbars - they crash on macOS ARM64 + Python 3.8) ---
         session_name = self.session_dir.parent.name.replace("_sync", "")
         self.win = f"GT Offset: {camera} | {session_name}"
         cv2.namedWindow(self.win, cv2.WINDOW_AUTOSIZE)
-
-        tb_offset = int(self.camera_offset / self.TB_STEP) + self.TB_CENTER
-        tb_offset = max(0, min(self.TB_MAX, tb_offset))
-        cv2.createTrackbar("Offset", self.win, tb_offset, self.TB_MAX,
-                           self._on_offset_tb)
-        cv2.createTrackbar("Frame", self.win, 0, max(1, self.clip_len - 1),
-                           self._on_frame_tb)
 
         print(f"\nClip: frames {self.start_frame}"
               f"~{self.start_frame + self.clip_len - 1} "
@@ -226,26 +229,8 @@ class GTOffsetPlayer:
         print("  a/d   : +/-1 frame    s/D : +/-10    w/W : +/-100")
         print("  [/]   : Offset +/-1.0    ,/. : +/-0.5")
         print("  e     : Save + redistribute GT    q : Quit")
-        print("  Trackbar 'Offset': drag to set    'Frame': seek in clip")
 
-    # ------------------------------------------------------------------
-    # Trackbar callbacks
-    # ------------------------------------------------------------------
-
-    def _on_offset_tb(self, val):
-        self.camera_offset = (val - self.TB_CENTER) * self.TB_STEP
-        self._show_current()
-
-    def _on_frame_tb(self, val):
-        self.clip_idx = min(val, self.clip_len - 1)
-        self._show_current()
-
-    def _sync_trackbars(self):
-        """Push internal state to trackbars (without triggering callbacks)."""
-        tb_off = int(self.camera_offset / self.TB_STEP) + self.TB_CENTER
-        tb_off = max(0, min(self.TB_MAX, tb_off))
-        cv2.setTrackbarPos("Offset", self.win, tb_off)
-        cv2.setTrackbarPos("Frame", self.win, self.clip_idx)
+    # (trackbars removed - they crash on macOS ARM64 + Python 3.8 OpenCV Cocoa backend)
 
     # ------------------------------------------------------------------
     # Frame mapping & projection
@@ -286,7 +271,7 @@ class GTOffsetPlayer:
                 pt = tuple(pts_2d[i].astype(int))
                 cv2.circle(frame, pt, 4, SKELETON_COLOR, -1)
 
-    def draw_blade_edges(self, frame, edges_3d):
+    def draw_blade_edges(self, frame, edges_3d, edge_color, fill_color):
         """Draw blade edges with semi-transparent fill. edges_3d: (E, 2, 3) in mm."""
         E = edges_3d.shape[0]
         edges_flat = edges_3d.reshape(-1, 3)  # (E*2, 3)
@@ -318,7 +303,7 @@ class GTOffsetPlayer:
                     left_2d[i], right_2d[i],
                     right_2d[i + 1], left_2d[i + 1],
                 ], dtype=np.int32)
-                cv2.fillPoly(overlay, [pts], BLADE_FILL_COLOR)
+                cv2.fillPoly(overlay, [pts], fill_color)
         cv2.addWeighted(overlay, BLADE_FILL_ALPHA, frame,
                         1 - BLADE_FILL_ALPHA, 0, frame)
 
@@ -327,14 +312,14 @@ class GTOffsetPlayer:
             if valid[i]:
                 p1 = tuple(left_2d[i].astype(int))
                 p2 = tuple(right_2d[i].astype(int))
-                cv2.line(frame, p1, p2, BLADE_EDGE_COLOR, 2)
+                cv2.line(frame, p1, p2, edge_color, 2)
 
         # Draw left/right edge curves
         valid_left = left_2d[valid].astype(np.int32).reshape(-1, 1, 2)
         valid_right = right_2d[valid].astype(np.int32).reshape(-1, 1, 2)
         if len(valid_left) > 1:
-            cv2.polylines(frame, [valid_left], False, BLADE_EDGE_COLOR, 2)
-            cv2.polylines(frame, [valid_right], False, BLADE_EDGE_COLOR, 2)
+            cv2.polylines(frame, [valid_left], False, edge_color, 2)
+            cv2.polylines(frame, [valid_right], False, edge_color, 2)
 
     def draw_hud(self, frame, gopro_frame, mocap_frame):
         """Draw frame info overlay + progress bar."""
@@ -342,10 +327,15 @@ class GTOffsetPlayer:
         status = "VALID" if in_range else "OUT OF RANGE"
         s_col = (0, 255, 0) if in_range else (0, 0, 255)
 
+        blade_str = ""
+        if self.blade_edges:
+            blade_names = list(self.blade_edges.keys())
+            blade_str = "  Blades: " + ", ".join(blade_names)
+
         lines = [
             (f"GoPro: {gopro_frame}  Mocap: {mocap_frame}  "
              f"Offset: {self.camera_offset:+.1f}", (255, 255, 255)),
-            (f"[{status}]  {self.camera}", s_col),
+            (f"[{status}]  {self.camera}{blade_str}", s_col),
         ]
 
         for i, (text, color) in enumerate(lines):
@@ -377,9 +367,11 @@ class GTOffsetPlayer:
         if 0 <= mocap_frame < self.n_mocap:
             skel = self.skeleton[mocap_frame]
             self.draw_skeleton(frame, skel)
-            if (self.blade_edges is not None
-                    and mocap_frame < len(self.blade_edges)):
-                self.draw_blade_edges(frame, self.blade_edges[mocap_frame])
+            for idx, (name, edges_arr) in enumerate(self.blade_edges.items()):
+                if mocap_frame < len(edges_arr):
+                    colors = BLADE_COLORS[idx % len(BLADE_COLORS)]
+                    self.draw_blade_edges(frame, edges_arr[mocap_frame],
+                                          colors[0], colors[1])
 
         self.draw_hud(frame, gopro_frame, mocap_frame)
         return frame
@@ -400,7 +392,6 @@ class GTOffsetPlayer:
             self.clip_idx = i
             rendered = self.render_frame(i)
             cv2.imshow(self.win, rendered)
-            cv2.setTrackbarPos("Frame", self.win, i)
             key = cv2.waitKey(delay_ms) & 0xFF
             if key == ord(' ') or key == ord('q'):
                 return key
@@ -458,7 +449,7 @@ class GTOffsetPlayer:
             cv2.destroyAllWindows()
             return
 
-        # Paused interaction loop (poll at ~20Hz for trackbar responsiveness)
+        # Paused interaction loop (poll at ~20Hz for key responsiveness)
         self._show_current()
         while True:
             key = cv2.waitKey(50) & 0xFF
@@ -470,7 +461,7 @@ class GTOffsetPlayer:
 
             elif key == ord(' '):
                 self.clip_idx = 0
-                self._sync_trackbars()
+
                 result = self.play_clip(0)
                 if result == ord('q'):
                     break
@@ -484,56 +475,56 @@ class GTOffsetPlayer:
 
             elif key == ord('d'):
                 self.clip_idx = min(self.clip_idx + 1, self.clip_len - 1)
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('a'):
                 self.clip_idx = max(self.clip_idx - 1, 0)
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('D'):
                 self.clip_idx = min(self.clip_idx + 10, self.clip_len - 1)
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('s'):
                 self.clip_idx = max(self.clip_idx - 10, 0)
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('W'):
                 self.clip_idx = min(self.clip_idx + 100, self.clip_len - 1)
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('w'):
                 self.clip_idx = max(self.clip_idx - 100, 0)
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord(']'):
                 self.camera_offset += 1.0
                 print(f"Offset: {self.camera_offset:+.1f}")
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('['):
                 self.camera_offset -= 1.0
                 print(f"Offset: {self.camera_offset:+.1f}")
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('.'):
                 self.camera_offset += 0.5
                 print(f"Offset: {self.camera_offset:+.1f}")
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord(','):
                 self.camera_offset -= 0.5
                 print(f"Offset: {self.camera_offset:+.1f}")
-                self._sync_trackbars()
+
                 self._show_current()
 
             elif key == ord('e'):

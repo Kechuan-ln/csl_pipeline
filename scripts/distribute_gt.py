@@ -23,12 +23,14 @@ Usage:
 
 Source data (auto-detected in {session_dir}/cam19/):
     skeleton_h36m.npy       (N_prime, 17, 3)     required
-    aligned_edges.npy       (N_prime, 17, 2, 3)  optional
+    *_edges.npy             (N_prime, E, 2, 3)   optional (multi-blade)
+    aligned_edges.npy       (N_prime, E, 2, 3)   fallback (single blade)
     polygon_vertices.npy    (N_prime, V, 3)       optional
 
 Output per camera ({session_dir}/camX/{gt_folder}/):
     skeleton.npy            (N_gopro, 17, 3)
-    blade_edges.npy         (N_gopro, 17, 2, 3)  if source exists
+    blade_edges.npy         (N_gopro, E, 2, 3)   single blade (from aligned_edges)
+    <name>_edges.npy        (N_gopro, E, 2, 3)   per-blade (multi-blade)
     polygon_vertices.npy    (N_gopro, V, 3)       if source exists
     valid_mask.npy          (N_gopro,)            bool
     gt_info.json            metadata
@@ -183,7 +185,6 @@ def distribute_gt(session_dir: str, camera_offsets_path: str = None,
 
     # --- Load source GT data from cam19 ---
     skeleton_path = cam19_dir / "skeleton_h36m.npy"
-    edges_path = cam19_dir / "aligned_edges.npy"
     polygon_path = cam19_dir / "polygon_vertices.npy"
 
     if not skeleton_path.exists():
@@ -193,10 +194,23 @@ def distribute_gt(session_dir: str, camera_offsets_path: str = None,
     skeleton_src = np.load(skeleton_path)
     print(f"  Skeleton: {skeleton_path.name} {skeleton_src.shape}")
 
-    edges_src = None
-    if edges_path.exists():
-        edges_src = np.load(edges_path)
-        print(f"  Edges:    {edges_path.name} {edges_src.shape}")
+    # Detect blade edge files: prefer named *_edges.npy, fall back to aligned_edges.npy
+    blade_sources = {}  # name -> (path, array)
+    named_edges = sorted([
+        p for p in cam19_dir.glob("*_edges.npy")
+        if p.name != "aligned_edges.npy"
+    ])
+    if named_edges:
+        for p in named_edges:
+            arr = np.load(p)
+            blade_sources[p.name] = (p, arr)
+            print(f"  Blade:    {p.name} {arr.shape}")
+    else:
+        edges_path = cam19_dir / "aligned_edges.npy"
+        if edges_path.exists():
+            arr = np.load(edges_path)
+            blade_sources["blade_edges.npy"] = (edges_path, arr)
+            print(f"  Edges:    {edges_path.name} {arr.shape} (single blade)")
 
     polygon_src = None
     if polygon_path.exists():
@@ -288,10 +302,11 @@ def distribute_gt(session_dir: str, camera_offsets_path: str = None,
         # Resample skeleton
         skel_out, valid_mask = resample_data(skeleton_src, mapping, n_gopro_frames)
 
-        # Resample edges (if available)
-        edges_out = None
-        if edges_src is not None:
-            edges_out, _ = resample_data(edges_src, mapping, n_gopro_frames)
+        # Resample blade edges (one or more blade files)
+        blade_outputs = {}  # output_name -> array
+        for out_name, (src_path, src_arr) in blade_sources.items():
+            resampled, _ = resample_data(src_arr, mapping, n_gopro_frames)
+            blade_outputs[out_name] = resampled
 
         # Resample polygon (if available)
         polygon_out = None
@@ -310,13 +325,17 @@ def distribute_gt(session_dir: str, camera_offsets_path: str = None,
         np.save(gt_dir / "skeleton.npy", skel_out)
         np.save(gt_dir / "valid_mask.npy", valid_mask)
 
-        if edges_out is not None:
-            np.save(gt_dir / "blade_edges.npy", edges_out)
+        for out_name, out_arr in blade_outputs.items():
+            np.save(gt_dir / out_name, out_arr)
 
         if polygon_out is not None:
             np.save(gt_dir / "polygon_vertices.npy", polygon_out)
 
         # Save metadata
+        blade_files = [
+            f"cam19/{src_path.name}"
+            for src_path, _ in blade_sources.values()
+        ] if blade_sources else None
         gt_info = {
             "n_frames": n_gopro_frames,
             "valid_start": valid_start,
@@ -328,7 +347,7 @@ def distribute_gt(session_dir: str, camera_offsets_path: str = None,
             "offset_seconds": offset_seconds,
             "frame_offset": cam_offset,
             "source_skeleton": "cam19/skeleton_h36m.npy",
-            "source_edges": "cam19/aligned_edges.npy" if edges_src is not None else None,
+            "blade_files": blade_files,
             "has_polygon": polygon_src is not None,
         }
         with open(gt_dir / "gt_info.json", "w") as f:
